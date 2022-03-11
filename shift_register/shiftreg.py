@@ -392,7 +392,8 @@ def shiftreg(input_gate_w = 0.035,
     # no shunt for readout, but separate_shunt chooses if readout line has separate terminal from bias
     readout_pads = 5 if separate_shunt else 4
     pad_count = 2*(drain_shunt_pads + input_pads + readout_pads)
-    workspace_sidelength = pad_count/4*90
+    # force device size to be at most 500 (480 includes extra space used by the tapers)
+    workspace_sidelength = min(pad_count/4*90, 480)
     pad_array = qg.pad_array(num=pad_count, size1=(workspace_sidelength, workspace_sidelength),
                              outline=pad_outline, layer=pad_layer)
     
