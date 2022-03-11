@@ -36,7 +36,7 @@ def label(prefix = 'sr',
 def shiftreg_halfstage(loop_sq = 2000,
                        loop_spacing = 0,
                        drain_sq = 200,
-                       routing_w = 1,
+                       routing_w = 5,
                        wire_w = 1, # much larger than constriction
                        ntron_gate_w = None,
                        constriction_w = 0.244, # t=16nm, Jc=46GA/m^2, Ic=180uA
@@ -192,17 +192,16 @@ def shiftreg_readout(num_halfstages = 4,
                      loop_sq = 2000,
                      loop_spacing = 5,
                      drain_sq = 200,
-                     routing_w = 1,
+                     routing_w = 5,
                      wire_w = 1, # much larger than constriction
                      constriction_w = 0.244, # t=16nm, Jc=46GA/m^2, Ic=180uA
                      nanowire_sq = 5, # don't make too many squares (fab limits)
                      switch_type = 'nw',
                      separate_shunt = 1,
-                     final_loop_sq = 1800,
+                     final_loop_sq = 2000,
                      final_loop_spacing = 0,
                      term_gate_w = 0.035,
                      term_channel_w = 0.24,
-                     term_drain_sq = 200,
                      layer = 1):
     """
     multiple halfstages + readout circuit
@@ -315,17 +314,16 @@ def shiftreg(input_gate_w = 0.035,
              loop_sq = 2000,
              loop_spacing = 5,
              drain_sq = 200,
-             routing_w = 1,
+             routing_w = 5,
              wire_w = 1, # much larger than constriction
              constriction_w = 0.244, # t=16nm, Jc=46GA/m^2, Ic=180uA
              nanowire_sq = 5, # don't make too many squares (fab limits)
              switch_type = 'nw',
              separate_shunt = 1,
-             final_loop_sq = 1800,
+             final_loop_sq = 2000,
              final_loop_spacing = 0,
              term_gate_w = 0.035,
              term_channel_w = 0.24,
-             term_drain_sq = 200,
              amp_gate_w = 0.035,
              amp_channel_w = 0.24,
              amp_gate_sq = 2000,
@@ -374,7 +372,7 @@ def shiftreg(input_gate_w = 0.035,
                               separate_shunt=separate_shunt, final_loop_sq=final_loop_sq,
                               final_loop_spacing=final_loop_spacing,
                               term_gate_w=term_gate_w, term_channel_w=term_channel_w,
-                              term_drain_sq=term_drain_sq, layer=dev_layer)
+                              layer=dev_layer)
     s = Dsr << stages
     
     if input_stage:
@@ -495,8 +493,8 @@ def shiftreg(input_gate_w = 0.035,
     amp0 = D2.add_ref(Damp).translate(-Damp.x,-Damp.y).translate(0, workspace_sidelength/8)
     amp1 = D2.add_ref(Damp).translate(-Damp.x,-Damp.y).rotate(angle=180).translate(0, -workspace_sidelength/8)
     # add two references and move them to their respective halves of the pad array
-    sr0 = D2.add_ref(Dsr).translate(-Dsr.x,-Dsr.y).translate(0, Dsr.ysize/2 + 10)
-    sr1 = D2.add_ref(Dsr).translate(-Dsr.x,-Dsr.y).rotate(angle=180).translate(0, -Dsr.ysize/2 - 10)
+    sr0 = D2.add_ref(Dsr).translate(-Dsr.x,-Dsr.y).translate(0, Dsr.ysize/2 + workspace_sidelength/25)
+    sr1 = D2.add_ref(Dsr).translate(-Dsr.x,-Dsr.y).rotate(angle=180).translate(0, -Dsr.ysize/2 - workspace_sidelength/25)
     g0 = sr0+amp0
     g1 = amp1+sr1
     g0.distribute(direction = 'x', spacing = 50)
@@ -585,7 +583,7 @@ def shiftreg(input_gate_w = 0.035,
                 axis = 0 if np.dot(p1_n, [1, 0]) else 1
                 length_tot = abs(port1.center[axis] - port2.center[axis])
                 # check first to see if we can do a straight route:
-                if abs(port1.center[1 - axis] - port2.center[1 - axis]) < 15:
+                if abs(port1.center[1 - axis] - port2.center[1 - axis]) < 10:
                     # pad contacts are 80um wide, so if we're close enough
                     # then just do a straight
                     straight_route = pg.straight(size = (routing_w, length_tot))
@@ -604,14 +602,15 @@ def shiftreg(input_gate_w = 0.035,
                         )
                     Routes << R
         except ValueError as e:
-            print(f'Unable to route as J/U path (please check gds to make sure there are no errors): {e}')
-            route_type = 'manhattan'
+            route_type = 'Z'
             R = pr.route_smooth(
                     port1,
                     port2,
                     width = routing_w,
                     radius = 2*routing_w,
                     path_type = route_type,
+                    length1 = 10,
+                    length2 = 10
                 )
             Routes << R
         # create hyper taper and connect to R
@@ -627,17 +626,49 @@ def shiftreg(input_gate_w = 0.035,
     return D2
 
 D = Device()
+spacing = 500
+label_layer = 255
 
-#####################
-# example usage
-#####################
-D << shiftreg(num_halfstages=1, switch_type='ntron', separate_shunt = 1, input_stage = 0, routing_w=5)
-# D << shiftreg(num_halfstages=1, switch_type='ntron', separate_shunt = 1, input_stage = 1, routing_w=5)
+# gridsweep is nice, but we're pretty space-constrained
+# make devices in a list and then use the packer
+devices = []
+i = 0
+for num_halfstages in [2, 1]:
+    for input_stage in [0, 1]:
+        for switch_type in ['ntron', 'nw']:
+            dev = shiftreg(switch_type=switch_type,
+                           num_halfstages=num_halfstages,
+                           input_stage=input_stage,
+                           routing_w=4)
+            label = f'switch_type={switch_type}\n'
+            label += f'num_halfstages={num_halfstages}\n'
+            label += f'input_stage={input_stage}'
+            dev.add_label(text=label, position=dev.center, layer=label_layer)
+            txt = pg.text(f'sr{i}', size=70, layer=5)
+            txt.move((dev.xmin+50, dev.ymax-150))
+            dev << txt
+            devices.append(dev)
+            i += 1
+
+duts = D << pg.packer(devices,
+                      spacing = spacing,
+                      aspect_ratio = (1, 1),
+                      max_size = (None, None),
+                      density = 1.05,
+                      sort_by_area = False,
+                      verbose = False)[0]
+
+D.center = (5000, 5000)
+
+#D << shiftreg(num_halfstages=1, switch_type='ntron', separate_shunt = 1, input_stage = 1, routing_w=5)
 # D << shiftreg(num_halfstages=2, switch_type='ntron', separate_shunt = 1, input_stage = 0, routing_w=5)
 # D << shiftreg(num_halfstages=4, switch_type='ntron', separate_shunt = 1, input_stage = 1, routing_w=5)
 # D.distribute(direction = 'x', spacing = 30)
 
 
+pg.union(D, by_layer = True)
+D.flatten()
+D.write_gds('shiftreg.gds', unit=1e-06, precision=1e-09, auto_rename=True, max_cellname_length=1024, cellname='toplevel')
 
-D.write_gds('shiftreg.gds', unit=1e-06, precision=1e-09, auto_rename=True, max_cellname_length=28, cellname='toplevel')
+#chip = D << pg.outline(pg.rectangle(size=(10000,10000), layer=0), distance=10)
 #qp(D)
