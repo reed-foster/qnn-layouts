@@ -6,7 +6,6 @@ Created on Wed Mar 02 14:11:16 2022
 
 """
 
-from __future__ import division, print_function, absolute_import
 import numpy as np
 from phidl import Device
 from phidl import Group
@@ -44,6 +43,7 @@ def shiftreg_halfstage(loop_sq = 2000,
                        switch_type = 'nw',
                        separate_shunt = 1,
                        bend_shunt = 1,
+                       dev_outline = 0.2,
                        layer = 1):
     """
     single halfstage
@@ -61,6 +61,7 @@ def shiftreg_halfstage(loop_sq = 2000,
     switch_type     - 'ntron' or 'nw'
     separate_shunt  - 1 if a separate contact for shunting resistor is constructed, 0 otherwise
     bend_shunt      - 1 if shunt connection should be bent up 90deg (useful for intermediate stages)
+    dev_outline     - width of device outline (in um) used for sizing inductor pitches
     layer           - layer
     """
     if switch_type not in ['nw', 'ntron']:
@@ -128,7 +129,7 @@ def shiftreg_halfstage(loop_sq = 2000,
         # just make a straight that is drain_sq*wire_w tall
         drain_ind = pg.straight(size=(wire_w, drain_sq*wire_w))
     else:
-        drain_ind = pg.snspd(wire_width=wire_w, wire_pitch=wire_w*2,
+        drain_ind = pg.snspd(wire_width=wire_w, wire_pitch=wire_w*2-(wire_w-2*dev_outline),
                              size=(52*wire_w, None), num_squares=drain_sq)
     ld = D << drain_ind
     ld.connect(drain_ind.ports[1], dw.ports[2])
@@ -161,7 +162,7 @@ def shiftreg_halfstage(loop_sq = 2000,
     d.connect(drain.ports[1], bjct.ports[1])
 
     # create loop inductor
-    loop_ind = pg.snspd(wire_width=wire_w, wire_pitch=wire_w*2,
+    loop_ind = pg.snspd(wire_width=wire_w, wire_pitch=wire_w*2-(wire_w-2*dev_outline),
                         size=(None, 64*wire_w), num_squares=loop_sq)
     ll = D << loop_ind
     if loop_spacing > 10*wire_w:
@@ -202,6 +203,7 @@ def shiftreg_readout(num_halfstages = 4,
                      final_loop_spacing = 0,
                      term_gate_w = 0.035,
                      term_channel_w = 0.24,
+                     dev_outline = 0.2,
                      layer = 1):
     """
     multiple halfstages + readout circuit
@@ -223,6 +225,7 @@ def shiftreg_readout(num_halfstages = 4,
     separate_shunt      - 1 if a separate contact for shunting resistor is constructed, 0 otherwise
     term_gate_w         - width of termination ntron gate (in um)
     term_channel_w      - width of termination ntron channel (in um)
+    dev_outline         - width of device outline (in um) used for sizing inductor pitches
     layer               - layer
     """
     D = Device('sr_readout')
@@ -233,13 +236,13 @@ def shiftreg_readout(num_halfstages = 4,
                             drain_sq=drain_sq, wire_w=wire_w, routing_w=routing_w,
                             constriction_w=constriction_w, nanowire_sq=nanowire_sq,
                             switch_type=switch_type, separate_shunt=separate_shunt,
-                            bend_shunt=1, layer=layer)
+                            bend_shunt=1, dev_outline=dev_outline, layer=layer)
     # separate number of squares and spacing for final loop
     final_hs = shiftreg_halfstage(loop_sq=final_loop_sq, loop_spacing=final_loop_spacing,
                                   drain_sq=drain_sq, wire_w=wire_w, routing_w=routing_w,
                                   constriction_w=constriction_w, nanowire_sq=nanowire_sq,
                                   switch_type=switch_type, separate_shunt=separate_shunt,
-                                  bend_shunt=1, layer=layer)
+                                  bend_shunt=1, dev_outline=dev_outline, layer=layer)
     # generate stages
     for i in range(num_halfstages):
         if i == num_halfstages - 1:
@@ -372,7 +375,7 @@ def shiftreg(input_gate_w = 0.035,
                               separate_shunt=separate_shunt, final_loop_sq=final_loop_sq,
                               final_loop_spacing=final_loop_spacing,
                               term_gate_w=term_gate_w, term_channel_w=term_channel_w,
-                              layer=dev_layer)
+                              dev_outline=dev_outline, layer=dev_layer)
     s = Dsr << stages
     
     if input_stage:
@@ -382,7 +385,7 @@ def shiftreg(input_gate_w = 0.035,
                                          ntron_gate_w=input_gate_w,
                                          constriction_w=input_channel_w, nanowire_sq=nanowire_sq,
                                          switch_type='ntron', separate_shunt=separate_shunt,
-                                         bend_shunt=0, layer=dev_layer)
+                                         bend_shunt=0, dev_outline=dev_outline, layer=dev_layer)
         i_stage = Dsr << input_stage
         i_stage.connect(input_stage.ports['output'], stages.ports['input'])
 
@@ -403,7 +406,7 @@ def shiftreg(input_gate_w = 0.035,
                              source_w=wire_w, drain_w=wire_w).mirror()
     ant = Damp << a_ntron
     # add large gate inductance to amplifier ntron
-    amp_gate_ind = pg.snspd(wire_width=wire_w/2, wire_pitch=wire_w,
+    amp_gate_ind = pg.snspd(wire_width=wire_w/2, wire_pitch=wire_w-(wire_w/2-2*dev_outline),
                             size=(None, None), num_squares=amp_gate_sq)
     amp_gl = Damp << amp_gate_ind
     amp_gate_straight = pg.straight(size=(wire_w/2, routing_w + wire_w))
