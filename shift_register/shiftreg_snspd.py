@@ -88,20 +88,13 @@ def shiftreg_halfstage(ind_sq = 500,
     #######################################################
     tee_jct = rg.optimal_tee(width=wire_w, side_length=5*wire_w, layer=layer)
     bias_jct = D << tee_jct
-    shunt_jct = D << tee_jct
     bias_jct.connect(bias_jct.ports[2], htron_drain_taper.ports[1])
-    shunt_jct.connect(shunt_jct.ports[1], bias_jct.ports[3])
 
     #######################################################
     # make loop inductor
     #######################################################
     ind_pitch = wire_w*2-(wire_w-2*dev_outline)
-    if ind_sq > 500:
-        ind_width = 50*wire_w
-    elif ind_sq > 200:
-        ind_width = 30*wire_w
-    else:
-        ind_width = 20*wire_w
+    ind_width = 50*wire_w if ind_sq > 500 else (30*wire_w if ind_sq > 200 else 20*wire_w)
     ind_spacer = D << pg.straight(size=(wire_w, (ind_spacing-4*wire_w)), layer=layer)
     ind = D << pg.snspd(wire_width=wire_w, wire_pitch=ind_pitch, size=(ind_width, None),
                         num_squares=ind_sq, layer=layer)
@@ -150,8 +143,8 @@ def shiftreg_halfstage(ind_sq = 500,
         D.add_port(name='input', port=pre_spacer.ports[2])
     D.add_port(name='gnd', port=gnd_taper.ports[2])
     D.add_port(name='shift_clk', port=bias_jct.ports[1])
-    D.add_port(name='shunt', port=shunt_jct.ports[3])
     D.add_port(name='output', port=ind.ports[2])
+    D.add_port(name='htron_ch', midpoint=htron_channel.center, width=htron_channel_w, orientation=180)
     return D
 
 def multistage_shiftreg(ind_spacings = (10, 5, 10),
@@ -236,8 +229,9 @@ def multistage_shiftreg(ind_spacings = (10, 5, 10),
     D.flatten(single_layer=layer)
     for i in range(len(halfstages)):
         D.add_port(name=3*i, port=halfstages[i].ports['shift_clk'])
-        D.add_port(name=3*i+1, port=halfstages[i].ports['shunt'])
-        D.add_port(name=3*i+2, port=halfstages[i].ports['gnd'])
+        D.add_port(name=3*i+1, port=halfstages[i].ports['gnd'])
+        if i % 2 == 0:
+            D.add_port(name=3*i+2, port=halfstages[i].ports['htron_ch'])
     offset = 3*len(halfstages)
     D.add_port(name=offset, port=output_ext.ports[2])
     D.add_port(name=offset+1, port=gate_ext.ports[2])
@@ -246,9 +240,9 @@ def multistage_shiftreg(ind_spacings = (10, 5, 10),
     return D
 
 
-def shiftreg_snspd_row(nbn_tron_layer = 2,
-                       nbn_snspd_layer = 1,
-                       heater_layer = 0,
+def shiftreg_snspd_row(nbn_layer = 0,
+                       via_layer = 1,
+                       heater_layer = 2,
                        snspd = True,
                        snspd_w = 0.3,
                        snspd_sq = 10000,
@@ -270,9 +264,9 @@ def shiftreg_snspd_row(nbn_tron_layer = 2,
     shift register with SNSPDs and heaters
     
     parameters:
-    nbn_tron_layer              - gds layer for NbN tron devices
-    nbn_snspd_layer             - gds layer for NbN snspds
-    heater_layer                - gds layer for Ti/Au heater
+    nbn_layer                   - gds layer for NbN devices (pos. tone, NbN etch)
+    via_layer                   - gds layer for SiO2 etch pattern (pos. tone, SiO2 etch)
+    heater_layer                - gds layer for Ti/Au heater (pos. tone, liftoff)
     snspd                       - True if snspd meander should be fabbed, False if just the heater
     snspd_w                     - snspd wire width in microns
     snspd_sq                    - number of squares in snspd
@@ -299,7 +293,7 @@ def shiftreg_snspd_row(nbn_tron_layer = 2,
                                    dev_outline=dev_outline, wire_w=wire_w,
                                    htron_constriction_ratio=htron_constriction_ratio,
                                    constriction_w=constriction_w, routing_w=routing_w,
-                                   drain_sq=drain_sq, source_sq=source_sq, layer=nbn_tron_layer)
+                                   drain_sq=drain_sq, source_sq=source_sq, layer=nbn_layer)
     sr = D << shiftreg
     snspd_pitch = snspd_w*2 - (snspd_w - 2*dev_outline)
     snspd_width = np.ceil(snspd_pitch*(snspd_sq**0.5))
@@ -308,110 +302,80 @@ def shiftreg_snspd_row(nbn_tron_layer = 2,
     for i in range(num_snspds):
         S = Device('snspd')
         # number of squares for curve to resistor taper
-        curve_sq = 4
-        #########################################
-        # make bumpout in snspd bias for heater
-        #########################################
+        curve_sq = 5
+        ########################################################
+        # make bumpout in snspd bias for heater/shunt resistor
+        ########################################################
+        bumpout_curve_temp = rg.optimal_l(width=(wire_w, 5*wire_w),
+                                          side_length=curve_sq*wire_w, layer=nbn_layer)
+        bumpout_curve = S << bumpout_curve_temp
+        bumpout_curve.rotate(90)
+        bumpout_curve.mirror((0,0), (0,1))
+        bumpout_curve.move(shiftreg.ports[6*i + 2].center - bumpout_curve.ports[2].center)
+        bumpout_curve.move((-heater_w/2, 0))
         if snspd:
-            bumpout_curve = S << rg.optimal_tee(width=(wire_w, heater_w + wire_w),
-                                                side_length=curve_sq*wire_w, layer=nbn_snspd_layer)
-        else:
-            bumpout_curve = S << rg.optimal_l(width=(wire_w, heater_w + wire_w),
-                                              side_length=curve_sq*wire_w, layer=nbn_snspd_layer)
-        straight_length = (9 + drain_sq/8)*wire_w - (curve_sq - 1)*wire_w - (heater_w + wire_w)/2
-        bias_straight = S << pg.straight(size=(wire_w, straight_length), layer=nbn_snspd_layer)
+            if i > 0:
+                hairpin = S << pg.optimal_hairpin(width=wire_w, pitch=2*wire_w + dev_outline,
+                                                  length=(6 + drain_sq/4)*wire_w, turn_ratio=2, layer=nbn_layer)
+            else:
+                hairpin = S << rg.optimal_l(width=(wire_w, routing_w), side_length=(7 + drain_sq/4)*wire_w - routing_w,
+                                            layer=nbn_layer)#.mirror((0,0),(0,1))
+            connector = S << pg.connector(width=wire_w)
+            connector.connect(connector.ports[1], bumpout_curve.ports[1])
+            hairpin.connect(hairpin.ports[1], connector.ports[1])
+            hairpin.move((0, bumpout_curve.ymin - hairpin.ymin))
+            wide_l = rg.optimal_l(width=wire_w, side_length=2*curve_sq*wire_w, layer=nbn_layer)
+            thin_l = rg.optimal_l(width=wire_w, side_length=curve_sq*wire_w, layer=nbn_layer)
+            turn_1 = S << wide_l
+            turn_2 = S << thin_l
+            straight_len = shiftreg.ports[3].x - shiftreg.ports[0].x - 40*wire_w
+            #straight_len = 43*wire_w if ind_sq > 500 else (23*wire_w if ind_sq > 200 else 13*wire_w)
+            straight_t = pg.straight(size=(wire_w, straight_len), layer=nbn_layer)
+            straight_1 = S << straight_t
+            turn_1.connect(turn_1.ports[1], hairpin.ports[1])
+            straight_1.connect(straight_1.ports[1], turn_1.ports[2])
+            turn_2.connect(turn_2.ports[2], straight_1.ports[2])
+            if i > 0:
+                turn_3 = S << thin_l
+                straight_2 = S << straight_t
+                turn_4 = S << wide_l
+                turn_3.connect(turn_3.ports[1], hairpin.ports[2])
+                straight_2.connect(straight_2.ports[1], turn_3.ports[2])
+                turn_4.connect(turn_4.ports[2], straight_2.ports[2])
+            step = S << pg.optimal_step(start_width=snspd_w, end_width=wire_w, symmetric=True, layer=nbn_layer)
+            meander = S << pg.snspd(wire_width=snspd_w, wire_pitch=snspd_pitch, size=(None,None),
+                                    num_squares=snspd_sq, layer=nbn_layer)
+            gnd_taper = S << qg.hyper_taper(length=routing_w, wide_section=routing_w, narrow_section=snspd_w,
+                                            layer=nbn_layer)
+            step.connect(step.ports[2], turn_2.ports[1])
+            meander.connect(meander.ports[2], step.ports[1])
+            gnd_taper.connect(gnd_taper.ports[1], meander.ports[1])
         #########################################
-        # make the snspd
-        #########################################
-        if snspd:
-            M = Device('meander')
-            m = M << pg.snspd(wire_width=snspd_w, wire_pitch=snspd_pitch, size=(None, None),
-                              num_squares=snspd_sq, layer=nbn_snspd_layer)
-            if nbn_snspd_layer < nbn_tron_layer:
-                cutout = M << pg.rectangle(size=(m.xsize + 2*wire_w, m.ysize + 2*wire_w), layer=nbn_tron_layer)
-                cutout.move((m.x - cutout.x, m.y - cutout.y))
-            M.add_port(name=1, port=m.ports[1])
-            M.add_port(name=2, port=m.ports[2])
-            meander = S << M
-            bias_taper = S << pg.optimal_step(snspd_w, wire_w, symmetric=True, layer=nbn_snspd_layer)
-            gnd_taper = S << qg.hyper_taper(length=2*wire_w, wide_section=routing_w, narrow_section=snspd_w, layer=nbn_snspd_layer)
-            bias_taper.connect(bias_taper.ports[1], meander.ports[1])
-            ext_length = shiftreg.ysize - 2*dev_outline + np.ceil(bias_taper.xsize) - bias_taper.xsize
-            ext_length -= straight_length + 2*(curve_sq - 1)*wire_w + heater_w + wire_w
-            taper_ext = S << pg.straight(size=(wire_w, ext_length), layer=nbn_snspd_layer)
-            taper_ext.connect(taper_ext.ports[2], bias_taper.ports[2])
-            gnd_taper.connect(gnd_taper.ports[1], meander.ports[2])
-            bumpout_curve.connect(bumpout_curve.ports[1], taper_ext.ports[1])
-            bias_straight.connect(bias_straight.ports[1], bumpout_curve.ports[2])
-        else:
-            bias_straight.rotate(270)
-            bumpout_curve.mirror((0,0), (0,1))
-            bumpout_curve.connect(bumpout_curve.ports[1], bias_straight.ports[1])
-        #########################################
-        # make the heater/snspd shunt
+        # make the heater/snspd shunt and vias
         #########################################
         # 1 square between snspd and ground; if we make it thick enough it should be ~10-50 Ohms
-        res = S << pg.rectangle(size=(heater_w, 2*wire_w + heater_w), layer=heater_layer)
-        if snspd:
-            res.move((bumpout_curve.ports[3].x - res.x, bumpout_curve.ports[3].y - res.ymin))
-        else:
-            res.move((bumpout_curve.ports[2].x - res.x, bumpout_curve.ports[2].y - res.ymin))
-        res.move((0, -wire_w))
-        #########################################
-        # make the ground return for the shunt resistor
-        #########################################
-        # straight from resistor to connect to smaller turn
-        res_gnd = S << pg.straight(size=(heater_w + wire_w, 5*wire_w), layer=nbn_snspd_layer)
-        res_gnd.move((res.x - res_gnd.ports[2].x, res.ymax - res_gnd.ports[2].y))
-        res_gnd.move((0, -wire_w))
-        res_gnd_turn = S << rg.optimal_l(width=(heater_w + wire_w, wire_w), side_length=4*wire_w, layer=nbn_snspd_layer)
-        res_gnd_turn.mirror((0,0),(0,1))
-        res_gnd_turn.connect(res_gnd_turn.ports[1], res_gnd.ports[1])
-        # straight long enough to go past the gate bias line on the ntron layer
-        res_gnd_ext_length = shiftreg.ysize - 2*dev_outline - straight_length - 2*(curve_sq - 1)*wire_w - heater_w - wire_w
-        res_gnd_ext = S << pg.straight(size=(wire_w, res_gnd_ext_length), layer=nbn_snspd_layer)
-        res_gnd_ext.connect(res_gnd_ext.ports[1], res_gnd_turn.ports[2])
-        if snspd:
-            # step up to routing_w
-            res_gnd_step = S << pg.optimal_step(wire_w, routing_w, symmetric=True, layer=nbn_snspd_layer)
-            res_gnd_step.connect(res_gnd_step.ports[1], res_gnd_ext.ports[2])
-            res_gnd_conn = S << pg.straight(size=(routing_w, gnd_taper.ports[2].x - res_gnd_step.ports[2].x - routing_w),
-                                            layer=nbn_snspd_layer)
-            res_gnd_conn.connect(res_gnd_conn.ports[1], res_gnd_step.ports[2])
-        if snspd:
-            # hyper taper to ground
-            res_gnd_taper = S << qg.hyper_taper(length=routing_w, wide_section=2*routing_w,
-                                                narrow_section=routing_w, layer=nbn_snspd_layer)
-            res_gnd_taper.connect(res_gnd_taper.ports[1], res_gnd_conn.ports[2])
-        else:
-            # hyper taper to ground
-            res_gnd_taper = S << qg.hyper_taper(length=routing_w, wide_section=2*routing_w,
-                                                narrow_section=wire_w, layer=nbn_snspd_layer)
-            res_gnd_taper.connect(res_gnd_taper.ports[1], res_gnd_ext.ports[2])
-        S = pg.union(S, by_layer=True)
-        S.add_port(name=1, port=bias_straight.ports[2])
-        if snspd:
-            S.add_port(name=2, port=gnd_taper.ports[2])
-        S.add_port(name=0, port=res_gnd_taper.ports[2])
-        snspd_dev = D << S
-        snspd_dev.rotate(270)
-        snspd_dev.mirror((0,0), (0,1))
-        snspds.append(snspd_dev)
-        dx = shiftreg.ports[6*i].x + (1+curve_sq)*wire_w - snspds[i].ports[1].x
-        dy = shiftreg.ports[6*i].y - snspds[i].ports[1].y
-        snspds[i].move((dx,dy))
+        res = S << pg.rectangle(size=(heater_w, 6*wire_w + heater_w), layer=heater_layer)
+        res.rotate(90)
+        res.move((bumpout_curve.ports[2].x - res.xmin, bumpout_curve.ports[2].y - res.y))
+        res.move((-3*wire_w, 0))
+        via_t = pg.rectangle(size=(2*wire_w, 2*wire_w), layer=via_layer)
+        via_1 = S << via_t
+        via_2 = S << via_t
+        via_1.move((res.xmin - via_1.xmin + wire_w/2, res.y - via_1.y))
+        via_2.move((res.xmax - via_2.xmax - wire_w/2, res.y - via_2.y))
+        snspds.append(D << S)
     # connect ground for snspds
-    left_gnd = snspds[0].ports[0]
-    right_gnd = snspds[-1].ports[2 if snspd else 0]
-    snspd_gnd_pour_w = right_gnd.endpoints[0][0] - left_gnd.endpoints[1][0]
-    snspd_gnd_pour_h = 2*routing_w
-    snspd_gnd_pour = D << pg.straight(size=(snspd_gnd_pour_h, snspd_gnd_pour_w), layer=nbn_snspd_layer)
-    snspd_gnd_pour.rotate(90)
-    snspd_gnd_pour.move(left_gnd.endpoints[1] - np.array([snspd_gnd_pour.xmin, snspd_gnd_pour.ymax - 1e-4]))
+    #left_gnd = snspds[0].ports[0]
+    #right_gnd = snspds[-1].ports[2 if snspd else 0]
+    #snspd_gnd_pour_w = right_gnd.endpoints[0][0] - left_gnd.endpoints[1][0]
+    #snspd_gnd_pour_h = 2*routing_w
+    #snspd_gnd_pour = D << pg.straight(size=(snspd_gnd_pour_h, snspd_gnd_pour_w), layer=nbn_snspd_layer)
+    #snspd_gnd_pour.rotate(90)
+    #snspd_gnd_pour.move(left_gnd.endpoints[1] - np.array([snspd_gnd_pour.xmin, snspd_gnd_pour.ymax - 1e-4]))
     D = pg.union(D, by_layer=True)
-    D.add_port(name=0, port=snspd_gnd_pour.ports[1])
+    #D.add_port(name=0, port=snspd_gnd_pour.ports[1])
     for i in range(num_snspds):
-        D.add_port(name=5*i+1, port=snspds[i].ports[1])
+        #D.add_port(name=5*i+1, port=snspds[i].ports[1])
         for pid in range(2):
             D.add_port(name=5*i+pid+2, port=shiftreg.ports[6*i+pid])
             D.add_port(name=5*i+pid+4, port=shiftreg.ports[6*i+3+pid])
@@ -419,11 +383,10 @@ def shiftreg_snspd_row(nbn_tron_layer = 2,
 
 def make_device_pair(dev_outline = 0.2,
                      pad_outline = 10,
-                     nbn_tron_pad_layer = 4,
-                     nbn_snspd_pad_layer = 2,
-                     nbn_tron_layer = 3,
-                     nbn_snspd_layer = 1,
-                     heater_layer = 0,
+                     nbn_pad_layer = 1,
+                     nbn_layer = 0,
+                     via_layer = 2,
+                     heater_layer = 3,
                      snspd_w = 0.3,
                      snspd_sq = 10000,
                      heater_w = 3,
@@ -445,12 +408,12 @@ def make_device_pair(dev_outline = 0.2,
     shiftregs = []
     port_offset = 0
     for snspd in (True, False):
-        shiftreg = E << shiftreg_snspd_row(nbn_tron_layer=nbn_tron_layer, nbn_snspd_layer=nbn_snspd_layer,
-                                           heater_layer=heater_layer, snspd=snspd, snspd_w=snspd_w,
-                                           snspd_sq=snspd_sq, heater_w=heater_w, ind_spacings=ind_spacings,
-                                           readout_channel_w=readout_channel_w, readout_gate_w=readout_gate_w,
-                                           readout_source_sq=readout_source_sq, readout_drain_sq=readout_drain_sq,
-                                           ind_sq=ind_sq, dev_outline=dev_outline, wire_w=wire_w,
+        shiftreg = E << shiftreg_snspd_row(nbn_layer=nbn_layer, via_layer=via_layer, heater_layer=heater_layer,
+                                           snspd=snspd, snspd_w=snspd_w, snspd_sq=snspd_sq, heater_w=heater_w,
+                                           ind_spacings=ind_spacings, readout_channel_w=readout_channel_w,
+                                           readout_gate_w=readout_gate_w, readout_source_sq=readout_source_sq,
+                                           readout_drain_sq=readout_drain_sq, ind_sq=ind_sq,
+                                           dev_outline=dev_outline, wire_w=wire_w,
                                            htron_constriction_ratio=htron_constriction_ratio,
                                            constriction_w=constriction_w, routing_w=routing_w, drain_sq=drain_sq,
                                            source_sq=source_sq)
@@ -482,18 +445,20 @@ def make_device_pair(dev_outline = 0.2,
     
 
 D = Device("test")
-D << make_device_pair(ind_spacings=(10, 5, 10), ind_sq=200)
+#D << multistage_shiftreg(ind_spacings=(10, 5, 10), ind_sq=200)
+D << shiftreg_snspd_row(ind_spacings=(10, 5, 10), ind_sq=200)
+#D << make_device_pair(ind_spacings=(15, 5, 15), ind_sq=2000, snspd_w=0.3, snspd_sq=20000)
 qp(D)
 exit()
 #D << pg.optimal_step(0.1, 1, symmetric=True)
 #D << rg.optimal_tee()
-for ind_sq in [200]:
-#for ind_sq in [200, 500, 750, 1000]:
+#for ind_sq in [200]:
+for ind_sq in [200, 500, 750, 1000]:
 #for ind_sq in [500, 1000, 2000]:
     D << shiftreg_snspd_row(ind_sq=ind_sq, ind_spacings=(20, 5, 20, 5, 20), wire_w=1, snspd=True)
     D << shiftreg_snspd_row(ind_sq=ind_sq, ind_spacings=(20, 5, 20, 5, 20), wire_w=1, snspd=False)
     #D << multistage_shiftreg()
-#D.distribute(direction = 'y', spacing = 10)
+D.distribute(direction = 'y', spacing = 10)
 #D.write_gds('shiftreg_snspd.gds', unit=1e-06, precision=1e-09, auto_rename=True, max_cellname_length=1024, cellname='toplevel')
 qp(D)
 
