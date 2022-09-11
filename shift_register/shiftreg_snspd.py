@@ -146,7 +146,8 @@ def shiftreg_halfstage(ind_sq = 500,
     D.add_port(name='htron_ch', midpoint=htron_channel.center, width=htron_channel_w, orientation=180)
     return D
 
-def multistage_shiftreg(ind_spacings = (10, 5, 10),
+def multistage_shiftreg(stage_count = 3,
+                        ind_spacing = 10,
                         readout_channel_w = 0.24,
                         readout_gate_w = 0.035,
                         readout_source_sq = 5,
@@ -165,7 +166,8 @@ def multistage_shiftreg(ind_spacings = (10, 5, 10),
     
     cascaded half stages, each with individually settable inductor spacing
     parameters:
-    ind_spacings                - spacing between ntron column and loop inductor in microns for each stage
+    stage_count                 - number of stages
+    ind_spacing                 - spacing between ntron column and loop inductor in microns for each stage
     readout_channel_w           - width of readout ntron channel in microns
     readout_gate_w              - width of readout ntron gate in microns
     readout_source_sq           - number of squares for source of readout ntron 
@@ -187,7 +189,7 @@ def multistage_shiftreg(ind_spacings = (10, 5, 10),
     # make halfstages
     #######################################################
     halfstages = []
-    for i, ind_spacing in enumerate(ind_spacings):
+    for i in range(stage_count):
         hcr = htron_constriction_ratio if (i % 2 == 0) else wire_w/constriction_w
         halfstages.append(D << shiftreg_halfstage(ind_sq=ind_sq, ind_spacing=ind_spacing,
                                                   dev_outline=dev_outline, wire_w=wire_w,
@@ -246,9 +248,11 @@ def shiftreg_snspd_row(nbn_layer = 0,
                        heater_layer = 2,
                        snspd = True,
                        snspd_w = 0.3,
+                       snspd_ff = 0.3,
                        snspd_sq = 10000,
                        heater_w = 3,
-                       ind_spacings = (10, 5, 10),
+                       stage_count = 3,
+                       ind_spacing = 10,
                        readout_channel_w = 0.24,
                        readout_gate_w = 0.035,
                        readout_source_sq = 5,
@@ -270,9 +274,11 @@ def shiftreg_snspd_row(nbn_layer = 0,
     heater_layer                - gds layer for Ti/Au heater (pos. tone, liftoff)
     snspd                       - True if snspd meander should be fabbed, False if just the heater
     snspd_w                     - snspd wire width in microns
+    snspd_ff                    - snspd fill factor (as ratio between 0 and 1)
     snspd_sq                    - number of squares in snspd
     heater_w                    - width of heater in microns
-    ind_spacings                - spacing between ntron column and loop inductor in microns for each stage
+    stage_count                 - number of shift register stages
+    ind_spacing                 - spacing between ntron column and loop inductor in microns for each stage
     readout_channel_w           - width of readout ntron channel in microns
     readout_gate_w              - width of readout ntron gate in microns
     readout_source_sq           - number of squares for source of readout ntron 
@@ -288,18 +294,18 @@ def shiftreg_snspd_row(nbn_layer = 0,
     """
 
     D = Device('shiftreg_snspd_row')
-    shiftreg = multistage_shiftreg(ind_spacings=ind_spacings, readout_channel_w=readout_channel_w,
-                                   readout_gate_w=readout_gate_w, readout_source_sq=readout_source_sq,
-                                   readout_drain_sq=readout_drain_sq, ind_sq=ind_sq,
-                                   dev_outline=dev_outline, wire_w=wire_w,
+    shiftreg = multistage_shiftreg(stage_count=stage_count, ind_spacing=ind_spacing,
+                                   readout_channel_w=readout_channel_w, readout_gate_w=readout_gate_w,
+                                   readout_source_sq=readout_source_sq, readout_drain_sq=readout_drain_sq,
+                                   ind_sq=ind_sq, dev_outline=dev_outline, wire_w=wire_w,
                                    htron_constriction_ratio=htron_constriction_ratio,
                                    constriction_w=constriction_w, routing_w=routing_w,
                                    drain_sq=drain_sq, source_sq=source_sq, layer=nbn_layer)
     sr = D << shiftreg
-    snspd_pitch = snspd_w*2 - (snspd_w - 2*dev_outline)
+    snspd_pitch = snspd_w/snspd_ff
     snspd_width = np.ceil(snspd_pitch*(snspd_sq**0.5))
     snspds = []
-    num_snspds = (len(ind_spacings) + 1)//2
+    num_snspds = (stage_count + 1)//2
     for i in range(num_snspds):
         S = Device('snspd')
         # number of squares for curve to resistor taper
@@ -393,9 +399,9 @@ def shiftreg_snspd_row(nbn_layer = 0,
             clk_taper_2 = S << wire_taper
             clk_taper_1.connect(clk_taper_1.ports[1], shiftreg.ports[6*i])
             clk_taper_2.connect(clk_taper_2.ports[1], shiftreg.ports[6*i + 3])
-        #########################################
-        # do outline for positive tone
-        #########################################
+        ##################################################################################
+        # do outline for positive tone and fix snspd cutout to meet snspd_ff
+        ##################################################################################
         S = pg.union(S, by_layer=True)
         # add ports first
         if snspd:
@@ -413,6 +419,20 @@ def shiftreg_snspd_row(nbn_layer = 0,
             S.add_port(name=5, port=clk_taper_2.ports[1])
         # do outline
         S = pg.outline(S, distance=dev_outline, open_ports=True, layer=nbn_layer)
+        if snspd:
+            # add pour over snspd and re-add meander
+            pour = pg.rectangle(size=(meander.xsize + 2*dev_outline, meander.ysize + 2*dev_outline),
+                                layer=nbn_layer)
+            pour.move((meander.x - pour.x, meander.y - pour.y))
+            M = pg.snspd(wire_width=snspd_w, wire_pitch=snspd_pitch, size=(None,None),
+                         num_squares=snspd_sq, layer=nbn_layer).rotate(90)
+            M.move((meander.x - M.x, meander.y - M.y))
+            straight = pg.rectangle(size=(snspd_w, dev_outline))
+            s1 = M << straight
+            s2 = M << straight
+            s1.move((M.ports[1].x - s1.x, M.ports[1].y - s1.ymax))
+            s2.move((M.ports[2].x - s2.x, M.ports[2].y - s2.ymin))
+            S << pg.boolean(A=pour, B=M, operation='not', precision=1e-6, num_divisions=[10,10], layer=nbn_layer)
         #########################################
         # make the heater/snspd shunt and vias
         #########################################
@@ -439,16 +459,17 @@ def shiftreg_snspd_row(nbn_layer = 0,
         D.add_port(name=3*i+2, port=snspds[i].ports[4])
     return D
 
-def make_device_pair(dev_outline = 0.2,
+def make_device_pair(snspd_count = 3,
+                     dev_outline = 0.2,
                      pad_outline = 10,
                      nbn_pad_layer = 1,
                      nbn_layer = 0,
                      via_layer = 2,
                      heater_layer = 3,
                      snspd_w = 0.3,
+                     snspd_ff = 0.3,
                      snspd_sq = 10000,
                      heater_w = 3,
-                     ind_spacings = (10, 5, 10),
                      readout_channel_w = 0.24,
                      readout_gate_w = 0.035,
                      readout_source_sq = 5,
@@ -466,12 +487,19 @@ def make_device_pair(dev_outline = 0.2,
     shiftregs = []
     port_offset = 0
     for snspd in (True, False):
+        if snspd:
+            pitch = snspd_w/snspd_ff
+            snspd_size = (pitch*snspd_w*snspd_sq)**0.5
+            ind_width = 50*wire_w if ind_sq > 500 else (30*wire_w if ind_sq > 200 else 20*wire_w)
+            spacing = max(snspd_size/2 - ind_width + 5, 10)
+        else:
+            spacing = 10
         shiftreg = E << shiftreg_snspd_row(nbn_layer=nbn_layer, via_layer=via_layer, heater_layer=heater_layer,
-                                           snspd=snspd, snspd_w=snspd_w, snspd_sq=snspd_sq, heater_w=heater_w,
-                                           ind_spacings=ind_spacings, readout_channel_w=readout_channel_w,
-                                           readout_gate_w=readout_gate_w, readout_source_sq=readout_source_sq,
-                                           readout_drain_sq=readout_drain_sq, ind_sq=ind_sq,
-                                           dev_outline=dev_outline, wire_w=wire_w,
+                                           snspd=snspd, snspd_w=snspd_w, snspd_ff=snspd_ff, snspd_sq=snspd_sq,
+                                           heater_w=heater_w, stage_count=2*snspd_count - 1, ind_spacing=spacing,
+                                           readout_channel_w=readout_channel_w, readout_gate_w=readout_gate_w,
+                                           readout_source_sq=readout_source_sq, readout_drain_sq=readout_drain_sq,
+                                           ind_sq=ind_sq, dev_outline=dev_outline, wire_w=wire_w,
                                            htron_constriction_ratio=htron_constriction_ratio,
                                            constriction_w=constriction_w, routing_w=routing_w, drain_sq=drain_sq,
                                            source_sq=source_sq)
@@ -485,8 +513,8 @@ def make_device_pair(dev_outline = 0.2,
         port_offset += len(shiftreg.ports.items())
     E.move((-E.x, -E.y))
     exp = D << E
-    snspd_pad_count = (len(ind_spacings) + 1)//2
-    ntron_pad_count = len(ind_spacings) + 2
+    snspd_pad_count = snspd_count
+    ntron_pad_count = 2*snspd_count + 1
     pad_count = (snspd_pad_count + ntron_pad_count)*2
     workspace_size = 1.75*max(E.xsize, E.ysize)
     pad_array = rg.pad_array(num_pads=pad_count, workspace_size=workspace_size,
@@ -536,10 +564,10 @@ D = Device("test")
 #D << shiftreg_snspd_row(ind_spacings=(10, 5, 10), ind_sq=250, snspd_sq=10000)
 #D << make_device_pair(ind_spacings=(15, 5, 15), ind_sq=2000, snspd_w=0.3, snspd_sq=20000)
 #D << make_device_pair(ind_spacings=(10, 5, 10), ind_sq=500, snspd_w=0.3, snspd_sq=10000, routing_w=5, dev_outline=0.45)
-#D << make_device_pair(ind_spacings=(10, 5, 10, 5, 10), ind_sq=500, snspd_w=0.3, snspd_sq=10000)
-#qp(D)
-#input('press any key to exit')
-#exit()
+D << make_device_pair(snspd_count=3, ind_sq=500, snspd_w=0.3, snspd_sq=5000, snspd_ff=0.2)
+qp(D)
+input('press any key to exit')
+exit()
 #D << pg.optimal_step(0.1, 1, symmetric=True)
 #D << rg.optimal_tee()
 #for ind_sq in [200]:

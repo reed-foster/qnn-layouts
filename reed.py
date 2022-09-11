@@ -182,7 +182,11 @@ def pad_array(num_pads = 8,
 def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pad_offset, layer):
     """
     automatically routes an experiment to a set of pads
-    
+   
+    Two step process. First step partially routes any experiment ports which are orthogonal to their
+    designated pad array port so that they are facing each other.  Then, sorts pairs of ports based
+    on the minimum horizontal (or vertical distance) between ports facing each other. Finally, 
+    routes the sorted pairs.
     exp_ports       - list of ports in experiment geometry
     pad_ports       - list of ports to connect to pad array
     workspace_size  - side length of workspace area
@@ -198,15 +202,25 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
     if len(exp_ports) != len(pad_ports):
         raise ValueError("invalid port lists for autorouter, lengths must match")
     num_ports = len(exp_ports)
+    
+    # create ports in final device for the side of the route that connects to the experiment
+    # the ports for the pads will be created later once the routes are determined
+    for n, port in enumerate(exp_ports):
+        D.add_port(name=n, midpoint=port.midpoint, width=port.width,
+                   orientation=(port.orientation + 180) % 360)
 
+    # find the pad with the minimum distance to experiment port 0
+    # we'll connect these two and connect pairs of ports sequentially around the pad array
+    # so there is no overlap
     min_dist, min_pad = workspace_size, -1
     for i in range(num_ports):
         norm = np.linalg.norm(exp_ports[0].center - pad_ports[i].center)
         if norm < min_dist:
             min_dist, min_pad = norm, i
-        
+
+    # helper function for sorting pairs of ports based on their distance
+    # used by both routing steps
     def pair_key(port_pair):
-        # helper function for sorting pairs of ports based on their distance 
         ep_n = port_pair[0].normal[1] - port_pair[0].center
         pp_n = port_pair[1].normal[1] - port_pair[1].center
         if abs(np.dot(ep_n, (1,0))) < 1e-9:
@@ -225,7 +239,9 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
             else:
                 # source (experiment) port is facing left/right so sort by y distance
                 return abs(port_pair[0].y - port_pair[1].y)
-
+    
+    # group the pairs or ports based on whether or not they are orthogonal and which direction the
+    # experiment port is facing
     pairs = [(exp_ports[i], pad_ports[(min_pad + i) % num_ports]) for i in range(num_ports)]
     # split pairs into four groups based on face of experiment (N, S, E, W)
     grouped_pairs = [[], [], [], []]
@@ -260,46 +276,46 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                 height[h_idx] += spacing if q == 0 else -spacing
                 start = (exp_p.x, exp_p.y + height[h_idx])
                 end = (exp_bbox[0][0] if pad_p.x < 0 else exp_bbox[1][0], exp_p.y + height[h_idx])
-                qnew = 3 if pad_p.x < 0 else 2
+                new_q = 3 if pad_p.x < 0 else 2
             else:
                 # select height index based on y coordinate of pad_p
                 h_idx = 0 if pad_p.y < 0 else 1
                 height[h_idx] += spacing if q == 2 else -spacing
                 start = (exp_p.x + height[h_idx], exp_p.y)
                 end = (exp_p.x + height[h_idx], exp_bbox[0][1] if pad_p.y < 0 else exp_bbox[1][1])
-                qnew = 1 if pad_p.y < 0 else 0
+                new_q = 1 if pad_p.y < 0 else 0
             path = Path((exp_p.center, start, end))
-            pnew = Port(name=exp_p.name, midpoint=end, width=exp_p.width,
+            new_port = Port(name=exp_p.name, midpoint=end, width=exp_p.width,
                         orientation=(pad_p.orientation + 180) % 360)
-            #grouped_pairs[qnew].append((pnew, pad_p, exp_p))
-            grouped_pairs[qnew].append((pnew, pad_p))
-            paths[qnew].append(path)
+            grouped_pairs[new_q].append((new_port, pad_p, exp_p))
+            paths[new_q].append(path)
     
-    flat_paths = [p for q in paths for p in q]
-    height_offset = pad_offset
     # now all ports face each other and the automatic routing will be straightforward
     for q, quadrant in enumerate(grouped_pairs):
         # keep track of height on both halves of experiment face
         # halves are based on x/y distance of pad_p and exp_p
         if q % 2 == 0:
-            height = [height_offset, height_offset]
+            height = [pad_offset, pad_offset]
         else:
-            height = [-height_offset, -height_offset]
+            height = [-pad_offset, -pad_offset]
         pad_p_prev_loc = [-1e9, 1e9] # keep track of previous pad x/y coordinate
         exp_p_prev_loc = [-1e9, 1e9]
         for p, port_pair in sorted(enumerate(quadrant), key = lambda a: pair_key(a[1])):
             exp_p = port_pair[0]
             pad_p = port_pair[1]
-            print(f'processing {num_ports+exp_p.name} -> {pad_p.name}')
             if pair_key(port_pair) < pad_p.width/3:
                 # pair key gets the x distance between vertically aligned ports and
                 # y distance for horizontally aligned ports
                 if q < 2:
                     # if exp_port is vertically aligned
                     new_path = Path((exp_p.center, (exp_p.x, pad_p.y)))
+                    new_port = Port(name=pad_p.name, midpoint=(exp_p.x, pad_p.y),
+                                    width=width, orientation=(exp_p.orientation + 180) % 360)
                     pad_p_prev_loc[h_idx] = pad_p.x
                 else:
                     new_path = Path((exp_p.center, (pad_p.x, exp_p.y)))
+                    new_port = Port(name=pad_p.name, midpoint=(pad_p.x, exp_p.y),
+                                    width=width, orientation=(exp_p.orientation + 180) % 360)
                     pad_p_prev_loc[h_idx] = pad_p.y
             else:
                 if q < 2:
@@ -311,7 +327,7 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                             or (pad_p.x > exp_p_prev_loc[h_idx] + spacing and h_idx == 0)
                             or (pad_p.x < exp_p_prev_loc[h_idx] - spacing and h_idx == 1)):
                         # height should be reset, since we're past the previous pad
-                        height[h_idx] = height_offset if q == 0 else -height_offset
+                        height[h_idx] = pad_offset if q == 0 else -pad_offset
                     start = (exp_p.x, pad_p.y - height[h_idx])
                     # check if we should keep going (i.e. is |pad_p.x - exp_p.x| too small to fit a bend)
                     if h_idx == 0:
@@ -332,7 +348,7 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                             or (pad_p.y > exp_p_prev_loc[h_idx] + spacing and h_idx == 0)
                             or (pad_p.y < exp_p_prev_loc[h_idx] - spacing and h_idx == 1)):
                         # height should be reset, since we're past the previous pad
-                        height[h_idx] = height_offset if q == 2 else -height_offset
+                        height[h_idx] = pad_offset if q == 2 else -pad_offset
                     start = (pad_p.x - height[h_idx], exp_p.y)
                     # check if we should keep going (i.e. is |pad_p.y - exp_p.y| too small to fit a bend)
                     if h_idx == 0:
@@ -345,24 +361,25 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                     exp_p_prev_loc[h_idx] = exp_p.y
                     height[h_idx] += spacing if q == 2 else -spacing
                 new_path = Path((exp_p.center, start, mid, end))
+                new_port = Port(name=pad_p.name, midpoint=end,
+                                width=width, orientation=(exp_p.orientation + 180) % 360)
             if paths[q][p] is not None:
                 paths[q][p].append(new_path)
             else:
                 paths[q][p] = new_path
- 
-    flat_paths = [p for q in paths for p in q]
-    qp(flat_paths)
-    #qp([D, *flat_paths])  
+            grouped_pairs[q][p] = (exp_p, new_port)
+
+    # perform routing along path and add final ports to connect to pad array
     for q, quadrant in enumerate(grouped_pairs):
         for p, port_pair in enumerate(quadrant):
             try:
-                p1 = port_pair[0] if len(port_pair) == 2 else port_pair[2]
-                D << pr.route_smooth(port1=p1, port2=port_pair[1], radius=2*width, width=width,
-                                         path_type='manual', manual_path=paths[q][p], layer=layer)
+                route = D << pr.route_smooth(port1=port_pair[0], port2=port_pair[1], radius=2*width, width=width,
+                                             path_type='manual', manual_path=paths[q][p], layer=layer)
+                D.add_port(name=num_ports + port_pair[1].name, port=route.ports[2])
             except ValueError as e:
                 traceback.print_exc()
                 print(paths[q][p].points)
-
+    
     return D
 
 def paths_intersect(path1, path2):
