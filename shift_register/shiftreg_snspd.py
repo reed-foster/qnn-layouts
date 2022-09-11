@@ -229,13 +229,15 @@ def multistage_shiftreg(ind_spacings = (10, 5, 10),
     for i in range(len(halfstages)):
         D.add_port(name=3*i, port=halfstages[i].ports['shift_clk'])
         D.add_port(name=3*i+1, port=halfstages[i].ports['gnd'])
-        if i % 2 == 0:
-            D.add_port(name=3*i+2, port=halfstages[i].ports['htron_ch'])
     offset = 3*len(halfstages)
     D.add_port(name=offset, port=output_ext.ports[1])
     D.add_port(name=offset+1, port=gate_ext.ports[1])
     D.add_port(name=offset+2, port=gnd_taper.ports[2])
     D = pg.outline(D, distance=dev_outline, open_ports=True, layer=layer)
+    # add this afterwards, otherwise it will disrupt the outline
+    for i in range(len(halfstages)):
+        if i % 2 == 0:
+            D.add_port(name=3*i+2, port=halfstages[i].ports['htron_ch'])
     return D
 
 
@@ -311,8 +313,12 @@ def shiftreg_snspd_row(nbn_layer = 0,
             bumpout_curve.move(shiftreg.ports[2].center - bumpout_curve.ports[2].center)
             bumpout_curve.move((-heater_w/2, 0))
         else:
-            bumpout_curve = S << rg.optimal_l(width=(wire_w, heater_w + wire_w),
-                                              side_length=curve_sq*wire_w*(1 if snspd else 1.5), layer=nbn_layer)
+            if snspd:
+                bumpout_curve = S << rg.optimal_l(width=(wire_w, heater_w + wire_w),
+                                                  side_length=curve_sq*wire_w, layer=nbn_layer)
+            else:
+                bumpout_curve = S << rg.optimal_l(width=(3*wire_w, heater_w + wire_w),
+                                                  side_length=2*curve_sq*wire_w, layer=nbn_layer)
             bumpout_curve.rotate(90)
             bumpout_curve.mirror((0,0), (0,1))
             bumpout_curve.move(shiftreg.ports[6*i + 2].center - bumpout_curve.ports[2].center)
@@ -375,8 +381,13 @@ def shiftreg_snspd_row(nbn_layer = 0,
             clk_taper_2.connect(clk_taper_2.ports[1], shiftreg.ports[6*i + 3])
         else:
             if i > 0:
-                snspd_taper = S << wire_taper
-                snspd_taper.connect(snspd_taper.ports[1], bumpout_curve.ports[1])
+                if snspd:
+                    snspd_taper = S << wire_taper
+                    snspd_taper.connect(snspd_taper.ports[1], bumpout_curve.ports[1])
+                else:
+                    snspd_taper = S << pg.optimal_step(start_width=3*wire_w, end_width=routing_w,
+                                                       symmetric=True, layer=nbn_layer)
+                    snspd_taper.connect(snspd_taper.ports[1], bumpout_curve.ports[1])
             # add taper for shiftreg clock
             clk_taper_1 = S << wire_taper
             clk_taper_2 = S << wire_taper
@@ -466,7 +477,7 @@ def make_device_pair(dev_outline = 0.2,
                                            source_sq=source_sq)
         if not snspd:
             shiftreg.rotate(180)
-            shiftreg.move((shiftregs[0].x - shiftreg.x, shiftregs[0].ymin - shiftreg.ymax - 5*routing_w))
+            shiftreg.move((shiftregs[0].x - shiftreg.x, shiftregs[0].ymin - shiftreg.ymax - 10*routing_w))
         shiftregs.append(shiftreg)
         # add ports
         for pid, port in shiftreg.ports.items():
@@ -505,14 +516,18 @@ def make_device_pair(dev_outline = 0.2,
                 # left
                 straight_len = exp_port.center[0] - exp.xmin
         if straight_len > 0:
-            to_edge = R << pg.straight(size=(routing_w, straight_len), layer=nbn_layer)
+            to_edge = R << pg.outline(pg.straight(size=(routing_w, straight_len)),
+                                      distance=dev_outline, open_ports=True, layer=nbn_layer)
             to_edge.connect(to_edge.ports[1], exp_port)
             to_edge.ports[2].name = exp_port.name
             new_exp_ports.append(to_edge.ports[2])
-    R << rg.autoroute(exp_ports=new_exp_ports, pad_ports=pa.ports, workspace_size=workspace_size,
-                      exp_bbox=exp.bbox, width=routing_w, spacing=3*routing_w,
-                      pad_offset=pad_outline+2*routing_w, layer=nbn_layer)
+    routes = rg.autoroute(exp_ports=new_exp_ports, pad_ports=pa.ports, workspace_size=workspace_size,
+                          exp_bbox=exp.bbox, width=routing_w, spacing=3*routing_w,
+                          pad_offset=pad_outline+2*routing_w, layer=nbn_layer)
+    routes = R << pg.outline(routes, distance=dev_outline, open_ports=True, layer=nbn_layer)
     D << R
+    D = pg.union(D, by_layer=True)
+
     return D
     
 
@@ -520,23 +535,24 @@ D = Device("test")
 #D << multistage_shiftreg(ind_spacings=(10, 5, 10), ind_sq=200)
 #D << shiftreg_snspd_row(ind_spacings=(10, 5, 10), ind_sq=250, snspd_sq=10000)
 #D << make_device_pair(ind_spacings=(15, 5, 15), ind_sq=2000, snspd_w=0.3, snspd_sq=20000)
-D << make_device_pair(ind_spacings=(10, 5, 10), ind_sq=500, snspd_w=0.3, snspd_sq=10000, routing_w=3)
+#D << make_device_pair(ind_spacings=(10, 5, 10), ind_sq=500, snspd_w=0.3, snspd_sq=10000, routing_w=5, dev_outline=0.45)
 #D << make_device_pair(ind_spacings=(10, 5, 10, 5, 10), ind_sq=500, snspd_w=0.3, snspd_sq=10000)
-qp(D)
-input('press any key to exit')
-exit()
+#qp(D)
+#input('press any key to exit')
+#exit()
 #D << pg.optimal_step(0.1, 1, symmetric=True)
 #D << rg.optimal_tee()
 #for ind_sq in [200]:
 for ind_sq in [200, 500, 1000]:
 #for ind_sq in [500, 1000, 2000]:
-    #D << shiftreg_snspd_row(ind_sq=ind_sq, ind_spacings=(20, 5, 20, 5, 20), wire_w=1, snspd=True, snspd_sq=15000)
+    #D << shiftreg_snspd_row(ind_sq=ind_sq, ind_spacings=(20, 5, 20, 5, 20), wire_w=1, snspd=True, snspd_sq=15000, dev_outline=0.45)
     #D << shiftreg_snspd_row(ind_sq=ind_sq, ind_spacings=(20, 5, 20, 5, 20), wire_w=1, snspd=False)
-    D << make_device_pair(ind_sq=ind_sq, ind_spacings=(10, 5, 10, 5, 10), snspd_sq=10000, snspd_w=0.3)
-    D << make_device_pair(ind_sq=ind_sq, ind_spacings=(10, 5, 10), snspd_sq=10000, snspd_w=0.3)
+    D << make_device_pair(ind_sq=ind_sq, ind_spacings=(20, 20, 20, 20, 20), snspd_sq=15000, dev_outline=0.45)
+    D << make_device_pair(ind_sq=ind_sq, ind_spacings=(10, 5, 10, 5, 10), snspd_sq=10000, snspd_w=0.3, dev_outline=0.45)
+    D << make_device_pair(ind_sq=ind_sq, ind_spacings=(10, 5, 10), snspd_sq=10000, snspd_w=0.3, dev_outline=0.45)
     #D << multistage_shiftreg()
-#D.distribute(direction = 'y', spacing = 10)
+D.distribute(direction = 'y', spacing = 10)
 #D.write_gds('shiftreg_snspd.gds', unit=1e-06, precision=1e-09, auto_rename=True, max_cellname_length=1024, cellname='toplevel')
-#qp(D)
+qp(D)
 
 input('press any key to exit')
