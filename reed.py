@@ -5,16 +5,20 @@ Created on Wed Mar 02 12:08:33 2022
 @author: reedf
 
 """
+import traceback
 
 import numpy as np
 from phidl import Device
-from phidl import Group
+from phidl import Path
+from phidl import Port
 import phidl.geometry as pg
 import phidl.routing as pr
+import phidl.path as pp
 
 from phidl import quickplot as qp
 from phidl import set_quickplot_options
-set_quickplot_options(blocking=True, show_ports=True)
+#set_quickplot_options(blocking=True, show_ports=True)
+set_quickplot_options(blocking=False, show_ports=True, new_window=True)
 
 import qnngds.utilities as qu
 import qnngds.geometry as qg
@@ -119,7 +123,7 @@ def pad_array(num_pads = 8,
     if not fab_layers.issubset(set(pos_tone.keys())):
         ex_str = "pad_layers must only use values from pos_tone.keys()\nunique pad_layers = "
         ex_str += str(fab_layers) + "\n pos_tone keys = " + str(set(pos_tone.keys()))
-        raise Exception(ex_str)
+        raise ValueError(ex_str)
 
     min_pad_per_side, excess = divmod(num_pads, 4)
     pads_per_side = np.tile(min_pad_per_side, 4)
@@ -175,9 +179,231 @@ def pad_array(num_pads = 8,
         D.add_port(name=n, port=p)
     return D
 
+def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pad_offset, layer):
+    """
+    automatically routes an experiment to a set of pads
+    
+    exp_ports       - list of ports in experiment geometry
+    pad_ports       - list of ports to connect to pad array
+    workspace_size  - side length of workspace area
+    exp_bbox        - bounding box of experiment
+    width           - width of traces (in microns)
+    spacing         - min spacing between traces (in microns)
+    pad_offset      - extra spacing from pads
+    layer           - gds layer
+    """
+
+    D = Device('autorouted_traces')
+
+    if len(exp_ports) != len(pad_ports):
+        raise ValueError("invalid port lists for autorouter, lengths must match")
+    num_ports = len(exp_ports)
+
+    min_dist, min_pad = workspace_size, -1
+    for i in range(num_ports):
+        norm = np.linalg.norm(exp_ports[0].center - pad_ports[i].center)
+        if norm < min_dist:
+            min_dist, min_pad = norm, i
+        
+    def pair_key(port_pair):
+        # helper function for sorting pairs of ports based on their distance 
+        ep_n = port_pair[0].normal[1] - port_pair[0].center
+        pp_n = port_pair[1].normal[1] - port_pair[1].center
+        if abs(np.dot(ep_n, (1,0))) < 1e-9:
+            if abs(np.dot(pp_n, ep_n)) < 1e-9:
+                # ports are orthogonal, and exp_port is facing up/down so sort by exp_port x
+                # make negative so this gets routed first
+                # we'll route these out to the left/right edge depending on the pad_port location
+                return -abs(port_pair[0].x)
+            else:
+                # both ports are facing up/down so sort by x distance
+                return abs(port_pair[0].x - port_pair[1].x)
+        else:
+            if abs(np.dot(pp_n, ep_n)) < 1e-9:
+                # ports are orthogonal
+                return -abs(port_pair[0].y)
+            else:
+                # source (experiment) port is facing left/right so sort by y distance
+                return abs(port_pair[0].y - port_pair[1].y)
+
+    pairs = [(exp_ports[i], pad_ports[(min_pad + i) % num_ports]) for i in range(num_ports)]
+    # split pairs into four groups based on face of experiment (N, S, E, W)
+    grouped_pairs = [[], [], [], []]
+    orthogonal_pairs = [[], [], [], []]
+    paths = [[], [], [], []]
+    for port_pair in pairs:
+        ep_n = port_pair[0].normal[1] - port_pair[0].center
+        pp_n = port_pair[1].normal[1] - port_pair[1].center
+        if abs(np.dot(ep_n, (1,0))) < 1e-9:
+            q = 0 if np.dot(ep_n, (0,1)) > 0 else 1
+        else:
+            q = 2 if np.dot(ep_n, (1,0)) > 0 else 3
+        if abs(np.dot(pp_n, ep_n)) < 1e-9:
+            orthogonal_pairs[q].append(port_pair)
+        else:
+            grouped_pairs[q].append(port_pair)
+            paths[q].append(None)
+  
+    # first create partial paths for orthogonal pairs and create new port at the end of partial path
+    for q, quadrant in enumerate(orthogonal_pairs):
+        # keep track of height on both halves of experiment face
+        # halves are based on x/y coordinate of pad_p
+        # since orthogonal ports are sorted based on how close they are to the edge of the bbox
+        # processing them in sorted order and incrementing height appropriately will prevent collisions
+        height = [0, 0]
+        for port_pair in sorted(quadrant, key = pair_key):
+            exp_p = port_pair[0]
+            pad_p = port_pair[1]
+            if q < 2:
+                # select height index based on x coordinate of pad_p
+                h_idx = 0 if pad_p.x < 0 else 1
+                height[h_idx] += spacing if q == 0 else -spacing
+                start = (exp_p.x, exp_p.y + height[h_idx])
+                end = (exp_bbox[0][0] if pad_p.x < 0 else exp_bbox[1][0], exp_p.y + height[h_idx])
+                qnew = 3 if pad_p.x < 0 else 2
+            else:
+                # select height index based on y coordinate of pad_p
+                h_idx = 0 if pad_p.y < 0 else 1
+                height[h_idx] += spacing if q == 2 else -spacing
+                start = (exp_p.x + height[h_idx], exp_p.y)
+                end = (exp_p.x + height[h_idx], exp_bbox[0][1] if pad_p.y < 0 else exp_bbox[1][1])
+                qnew = 1 if pad_p.y < 0 else 0
+            path = Path((exp_p.center, start, end))
+            pnew = Port(name=exp_p.name, midpoint=end, width=exp_p.width,
+                        orientation=(pad_p.orientation + 180) % 360)
+            #grouped_pairs[qnew].append((pnew, pad_p, exp_p))
+            grouped_pairs[qnew].append((pnew, pad_p))
+            paths[qnew].append(path)
+    
+    flat_paths = [p for q in paths for p in q]
+    height_offset = pad_offset
+    # now all ports face each other and the automatic routing will be straightforward
+    for q, quadrant in enumerate(grouped_pairs):
+        # keep track of height on both halves of experiment face
+        # halves are based on x/y distance of pad_p and exp_p
+        if q % 2 == 0:
+            height = [height_offset, height_offset]
+        else:
+            height = [-height_offset, -height_offset]
+        pad_p_prev_loc = [-1e9, 1e9] # keep track of previous pad x/y coordinate
+        exp_p_prev_loc = [-1e9, 1e9]
+        for p, port_pair in sorted(enumerate(quadrant), key = lambda a: pair_key(a[1])):
+            exp_p = port_pair[0]
+            pad_p = port_pair[1]
+            print(f'processing {num_ports+exp_p.name} -> {pad_p.name}')
+            if pair_key(port_pair) < pad_p.width/3:
+                # pair key gets the x distance between vertically aligned ports and
+                # y distance for horizontally aligned ports
+                if q < 2:
+                    # if exp_port is vertically aligned
+                    new_path = Path((exp_p.center, (exp_p.x, pad_p.y)))
+                    pad_p_prev_loc[h_idx] = pad_p.x
+                else:
+                    new_path = Path((exp_p.center, (pad_p.x, exp_p.y)))
+                    pad_p_prev_loc[h_idx] = pad_p.y
+            else:
+                if q < 2:
+                    # select height index based on difference in x coordinate (i.e. do we need to go left or right?)
+                    # zero: left, one: right
+                    h_idx = 0 if exp_p.x > pad_p.x else 1
+                    if ((exp_p.x < pad_p_prev_loc[h_idx] - spacing and h_idx == 0)
+                            or (exp_p.x > pad_p_prev_loc[h_idx] + spacing and h_idx == 1)
+                            or (pad_p.x > exp_p_prev_loc[h_idx] + spacing and h_idx == 0)
+                            or (pad_p.x < exp_p_prev_loc[h_idx] - spacing and h_idx == 1)):
+                        # height should be reset, since we're past the previous pad
+                        height[h_idx] = height_offset if q == 0 else -height_offset
+                    start = (exp_p.x, pad_p.y - height[h_idx])
+                    # check if we should keep going (i.e. is |pad_p.x - exp_p.x| too small to fit a bend)
+                    if h_idx == 0:
+                        end_x = max(min(pad_p.x, exp_p.x - 5*width), pad_p.x - pad_p.width/3)
+                    else:
+                        end_x = min(max(pad_p.x, exp_p.x + 5*width), pad_p.x + pad_p.width/3)
+                    mid = (end_x, pad_p.y - height[h_idx])
+                    end = (end_x, pad_p.y)
+                    pad_p_prev_loc[h_idx] = pad_p.x
+                    exp_p_prev_loc[h_idx] = exp_p.x
+                    height[h_idx] += spacing if q == 0 else -spacing
+                else:
+                    # select height index based on difference in y coordinate (i.e. do we need to go up or down?)
+                    # zero: down, one: up
+                    h_idx = 0 if exp_p.y > pad_p.y else 1
+                    if ((exp_p.y < pad_p_prev_loc[h_idx] - spacing and h_idx == 0)
+                            or (exp_p.y > pad_p_prev_loc[h_idx] + spacing and h_idx == 1)
+                            or (pad_p.y > exp_p_prev_loc[h_idx] + spacing and h_idx == 0)
+                            or (pad_p.y < exp_p_prev_loc[h_idx] - spacing and h_idx == 1)):
+                        # height should be reset, since we're past the previous pad
+                        height[h_idx] = height_offset if q == 2 else -height_offset
+                    start = (pad_p.x - height[h_idx], exp_p.y)
+                    # check if we should keep going (i.e. is |pad_p.y - exp_p.y| too small to fit a bend)
+                    if h_idx == 0:
+                        end_y = max(min(pad_p.y, exp_p.y - 5*width), pad_p.y - pad_p.width/3)
+                    else:
+                        end_y = min(max(pad_p.y, exp_p.y + 5*width), pad_p.y + pad_p.width/3)
+                    mid = (pad_p.x - height[h_idx], end_y)
+                    end = (pad_p.x, end_y)
+                    pad_p_prev_loc[h_idx] = pad_p.y
+                    exp_p_prev_loc[h_idx] = exp_p.y
+                    height[h_idx] += spacing if q == 2 else -spacing
+                new_path = Path((exp_p.center, start, mid, end))
+            if paths[q][p] is not None:
+                paths[q][p].append(new_path)
+            else:
+                paths[q][p] = new_path
+ 
+    flat_paths = [p for q in paths for p in q]
+    qp(flat_paths)
+    #qp([D, *flat_paths])  
+    for q, quadrant in enumerate(grouped_pairs):
+        for p, port_pair in enumerate(quadrant):
+            try:
+                p1 = port_pair[0] if len(port_pair) == 2 else port_pair[2]
+                D << pr.route_smooth(port1=p1, port2=port_pair[1], radius=2*width, width=width,
+                                         path_type='manual', manual_path=paths[q][p], layer=layer)
+            except ValueError as e:
+                traceback.print_exc()
+                print(paths[q][p].points)
+
+    return D
+
+def paths_intersect(path1, path2):
+    # 2d "cross product"/determinant
+    cross2d = lambda v1, v2: v1[0]*v2[1] - v1[1]*v2[0]
+    if (path1.xmin < path2.xmax and path1.xmax > path2.xmin and path1.ymin < path2.ymax and path1.ymax > path2.ymin):
+        # bboxes intersect, iterate over segments to check if they intersect
+        for p1 in range(len(path1.points) - 1):
+            for p2 in range(len(path2.points) - 1):
+                p = path1.points[p1]
+                q = path2.points[p2]
+                r = path1.points[p1 + 1] - path1.points[p1]
+                s = path2.points[p2 + 1] - path2.points[p2]
+                rxs = cross2d(r, s)
+                if abs(rxs) < 1e-9:
+                    # lines are parallel
+                    if abs(cross2d(q - p, r)) < 1e-9:
+                        # collinear
+                        t0 = np.dot(q - p, r) / np.dot(r, r)
+                        t1 = t0 + np.dot(s, r) / np.dot(r, r)
+                        if (t0 <= 1 and t0 >= 0) or (t1 <= 1 and t1 >= 0) or (t1 >= 1 and t0 <= 0) or (t0 >= 1 and t1 <= 0):
+                            # lines overlap
+                            return True
+                else:
+                    t = cross2d(q - p, r) / rxs
+                    u = cross2d(q - p, s) / rxs
+                    if t <= 1 and t >= 0 and u <= 1 and u >= 0:
+                        # lines intersect
+                        return True
+        return False
+
+    else:
+        return False
+
 if __name__ == "__main__":
     # simple unit test
-    D = Device("test")
+    p1 = Path(((0,0), (0,1), (1,1), (1,2), (5,2)))
+    p2 = Path(((0,-1), (1,-1), (1,0), (2,0), (2,1)))
+    print(paths_intersect(p1, p2))
+    qp([p1, p2])
+    #D = Device("test")
     #D << qg.pad_array(pad_iso=True, de_etch=True)
     #D << qg.pad_array(num=8, outline=10, layer=2)
     #D << pad_array(num_pads=22, workspace_size=1000, pad_layers=tuple(1 for i in range(22)), outline=10, pos_tone={1:True})
@@ -185,6 +411,6 @@ if __name__ == "__main__":
     #D << optimal_l(width=(1,3))
     #D << optimal_tee(width=(1,1))
     #D << optimal_tee(width=(1,5))
-    D << pg.optimal_hairpin(width=1, pitch=1.2, length=5, turn_ratio=2, num_pts=100)
-    D.distribute(direction = 'y', spacing = 10)
-    qp(D)
+    #D << pg.optimal_hairpin(width=1, pitch=1.2, length=5, turn_ratio=2, num_pts=100)
+    #D.distribute(direction = 'y', spacing = 10)
+    #qp(D)
