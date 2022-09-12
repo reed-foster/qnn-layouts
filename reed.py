@@ -99,7 +99,7 @@ def optimal_tee(width = 1,
     return D
 
 def pad_array(num_pads = 8,
-              workspace_size = 100,
+              workspace_size = (100, 200),
               pad_size = (200, 250),
               pad_layers = (2,2,1,2,2,2,2,2),
               outline = 10,
@@ -110,7 +110,7 @@ def pad_array(num_pads = 8,
     renumbers ports so they follow standard ordering (CW increasing from top left corner)
     option to do negative tone for specific pads on specific layers
     num_pads        - total number of pads (will be evenly divided between the 4 sides
-    workspace_size  - side length (in microns) of workspace area
+    workspace_size  - tuple, width and height (in microns) of workspace area
     pad_size        - tuple, width and height (in microns) of each pad
     pad_layers      - tuple, gds layer for each pad (index 0 corresponds to the leftmost pad in the top row)
     outline         - outline width for positive tone
@@ -126,18 +126,25 @@ def pad_array(num_pads = 8,
         raise ValueError(ex_str)
 
     min_pad_per_side, excess = divmod(num_pads, 4)
-    pads_per_side = np.tile(min_pad_per_side, 4)
-    for i in range(excess):
+    top_bottom_pads = int(num_pads * workspace_size[0]/(workspace_size[0] + workspace_size[1]))
+    left_right_pads = int(num_pads * workspace_size[1]/(workspace_size[0] + workspace_size[1]))
+    pads_per_side = np.zeros(4, dtype=np.int32)
+    pads_per_side[0] += left_right_pads//2 # west side
+    pads_per_side[1] += left_right_pads//2 # east side
+    pads_per_side[2] += top_bottom_pads//2 # south side
+    pads_per_side[3] += top_bottom_pads//2 # north side
+    unassigned = num_pads - 2*(top_bottom_pads//2 + left_right_pads//2)
+    for i in range(unassigned):
         pads_per_side[i] += 1
-    pads_per_side.sort()
     conn_dict = {'W': pads_per_side[0],
                  'E': pads_per_side[1],
                  'S': pads_per_side[2],
                  'N': pads_per_side[3]}
 
-    inner_compass = pg.compass_multi(size=(workspace_size, workspace_size), ports=conn_dict, layer=1)
-    outer_compass_size = max(workspace_size, np.max(pads_per_side)*(min(pad_size) + outline*5))
-    outer_compass = pg.compass_multi(size=(outer_compass_size, outer_compass_size), ports=conn_dict, layer=1)
+    inner_compass = pg.compass_multi(size=workspace_size, ports=conn_dict, layer=1)
+    outer_compass_w = max(workspace_size[0], np.max(pads_per_side[:2])*(pad_size[0] + outline*5))
+    outer_compass_h = max(workspace_size[1], np.max(pads_per_side[2:])*(pad_size[0] + outline*5))
+    outer_compass = pg.compass_multi(size=(outer_compass_h, outer_compass_w), ports=conn_dict, layer=1)
    
     def port_idx(port_name, conn_dict, min_pads_per_side):
         # helper function to rename ports so they are ordered nicely
@@ -212,7 +219,7 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
     # find the pad with the minimum distance to experiment port 0
     # we'll connect these two and connect pairs of ports sequentially around the pad array
     # so there is no overlap
-    min_dist, min_pad = workspace_size, -1
+    min_dist, min_pad = max(workspace_size), -1
     for i in range(num_ports):
         norm = np.linalg.norm(exp_ports[0].center - pad_ports[i].center)
         if norm < min_dist:
@@ -416,18 +423,16 @@ def paths_intersect(path1, path2):
 
 if __name__ == "__main__":
     # simple unit test
-    p1 = Path(((0,0), (0,1), (1,1), (1,2), (5,2)))
-    p2 = Path(((0,-1), (1,-1), (1,0), (2,0), (2,1)))
-    print(paths_intersect(p1, p2))
-    qp([p1, p2])
-    #D = Device("test")
+    D = Device("test")
     #D << qg.pad_array(pad_iso=True, de_etch=True)
     #D << qg.pad_array(num=8, outline=10, layer=2)
-    #D << pad_array(num_pads=22, workspace_size=1000, pad_layers=tuple(1 for i in range(22)), outline=10, pos_tone={1:True})
+    D << pad_array(num_pads=22, workspace_size=(500, 800), pad_layers=tuple(1 for i in range(22)), outline=10, pos_tone={1:True})
     #D << optimal_l(width=(1,1))
     #D << optimal_l(width=(1,3))
+    #D << optimal_l(width=(5,1))
     #D << optimal_tee(width=(1,1))
     #D << optimal_tee(width=(1,5))
     #D << pg.optimal_hairpin(width=1, pitch=1.2, length=5, turn_ratio=2, num_pts=100)
-    #D.distribute(direction = 'y', spacing = 10)
-    #qp(D)
+    D.distribute(direction = 'y', spacing = 10)
+    qp(D)
+    input('press any key to exit')

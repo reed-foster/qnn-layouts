@@ -315,8 +315,7 @@ def shiftreg_snspd_row(nbn_layer = 0,
         ########################################################
         if not snspd and i == 0:
             bumpout_curve = S << pg.straight(size=(routing_w, routing_w), layer=nbn_layer)
-            bumpout_curve.rotate(90)
-            bumpout_curve.move(shiftreg.ports[2].center - bumpout_curve.ports[2].center)
+            bumpout_curve.connect(bumpout_curve.ports[2], shiftreg.ports[6*i + 2])
             bumpout_curve.move((-heater_w/2, 0))
         else:
             if snspd:
@@ -325,9 +324,10 @@ def shiftreg_snspd_row(nbn_layer = 0,
             else:
                 bumpout_curve = S << rg.optimal_l(width=(3*wire_w, heater_w + wire_w),
                                                   side_length=2*curve_sq*wire_w, layer=nbn_layer)
-            bumpout_curve.rotate(90)
+                if 3*wire_w > heater_w + wire_w:
+                    bumpout_curve.mirror((0,0), (0,1))
             bumpout_curve.mirror((0,0), (0,1))
-            bumpout_curve.move(shiftreg.ports[6*i + 2].center - bumpout_curve.ports[2].center)
+            bumpout_curve.connect(bumpout_curve.ports[2], shiftreg.ports[6*i + 2])
             bumpout_curve.move((-heater_w/2, 0))
         # taper for going from wire_w to routing_w
         wire_taper = pg.optimal_step(start_width=wire_w, end_width=routing_w, symmetric=True, layer=nbn_layer)
@@ -432,7 +432,7 @@ def shiftreg_snspd_row(nbn_layer = 0,
             s2 = M << straight
             s1.move((M.ports[1].x - s1.x, M.ports[1].y - s1.ymax))
             s2.move((M.ports[2].x - s2.x, M.ports[2].y - s2.ymin))
-            S << pg.boolean(A=pour, B=M, operation='not', precision=1e-6, num_divisions=[10,10], layer=nbn_layer)
+            S << pg.boolean(A=pour, B=M, operation='not', precision=1e-6, num_divisions=(1,1), layer=nbn_layer)
         #########################################
         # make the heater/snspd shunt and vias
         #########################################
@@ -441,7 +441,8 @@ def shiftreg_snspd_row(nbn_layer = 0,
         res.rotate(90)
         res.move((bumpout_curve.ports[2].x - res.xmin, bumpout_curve.ports[2].y - res.y))
         res.move((-3*wire_w, 0))
-        via_t = pg.rectangle(size=(2*wire_w, 2*wire_w), layer=via_layer)
+        via_size = max(heater_w - 1, 1)
+        via_t = pg.rectangle(size=(via_size, via_size), layer=via_layer)
         via_1 = S << via_t
         via_2 = S << via_t
         via_1.move((res.xmin - via_1.xmin + wire_w/2, res.y - via_1.y))
@@ -516,7 +517,7 @@ def make_device_pair(snspd_count = 3,
     snspd_pad_count = snspd_count
     ntron_pad_count = 2*snspd_count + 1
     pad_count = (snspd_pad_count + ntron_pad_count)*2
-    workspace_size = 1.75*max(E.xsize, E.ysize)
+    workspace_size = (1.5*E.xsize, 1.7*E.ysize)
     pad_array = rg.pad_array(num_pads=pad_count, workspace_size=workspace_size,
                              pad_layers=tuple(nbn_pad_layer for i in range(pad_count)),
                              outline=pad_outline,
@@ -564,7 +565,7 @@ D = Device("test")
 #D << shiftreg_snspd_row(ind_spacings=(10, 5, 10), ind_sq=250, snspd_sq=10000)
 #D << make_device_pair(ind_spacings=(15, 5, 15), ind_sq=2000, snspd_w=0.3, snspd_sq=20000)
 #D << make_device_pair(ind_spacings=(10, 5, 10), ind_sq=500, snspd_w=0.3, snspd_sq=10000, routing_w=5, dev_outline=0.45)
-D << make_device_pair(snspd_count=3, ind_sq=500, snspd_w=0.3, snspd_sq=5000, snspd_ff=0.2)
+D << make_device_pair(snspd_count=3, ind_sq=500, snspd_w=0.3, snspd_sq=5000, snspd_ff=0.2, wire_w=1)
 qp(D)
 input('press any key to exit')
 exit()
