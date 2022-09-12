@@ -242,7 +242,6 @@ def multistage_shiftreg(stage_count = 3,
             D.add_port(name=3*i+2, port=halfstages[i].ports['htron_ch'])
     return D
 
-
 def shiftreg_snspd_row(nbn_layer = 0,
                        via_layer = 1,
                        heater_layer = 2,
@@ -322,11 +321,10 @@ def shiftreg_snspd_row(nbn_layer = 0,
                 bumpout_curve = S << rg.optimal_l(width=(wire_w, heater_w + wire_w),
                                                   side_length=curve_sq*wire_w, layer=nbn_layer)
             else:
+                # make the curve a bit wider if no snspd in case there are constrictions or htron
+                # just needs more heater current than can be supplied by the thin wire
                 bumpout_curve = S << rg.optimal_l(width=(3*wire_w, heater_w + wire_w),
                                                   side_length=2*curve_sq*wire_w, layer=nbn_layer)
-                if 3*wire_w > heater_w + wire_w:
-                    bumpout_curve.mirror((0,0), (0,1))
-            bumpout_curve.mirror((0,0), (0,1))
             bumpout_curve.connect(bumpout_curve.ports[2], shiftreg.ports[6*i + 2])
             bumpout_curve.move((-heater_w/2, 0))
         # taper for going from wire_w to routing_w
@@ -338,6 +336,9 @@ def shiftreg_snspd_row(nbn_layer = 0,
             else:
                 hairpin = S << rg.optimal_l(width=(wire_w, routing_w),
                                             side_length=(7 + drain_sq/4)*wire_w - routing_w, layer=nbn_layer)
+                # optimal_l has port 1 facing up and port 2 facing right
+                # we want this opimal_l to be facing the opposite direction of the bumpout_curve
+                hairpin.mirror((0,0), (0,1))
             connector = S << pg.connector(width=wire_w)
             connector.connect(connector.ports[1], bumpout_curve.ports[1])
             hairpin.connect(hairpin.ports[1], connector.ports[1])
@@ -437,16 +438,10 @@ def shiftreg_snspd_row(nbn_layer = 0,
         # make the heater/snspd shunt and vias
         #########################################
         # 1 square between snspd and ground; if we make it thick enough it should be ~10-50 Ohms
-        res = S << pg.rectangle(size=(heater_w, 6*wire_w + heater_w), layer=heater_layer)
-        res.rotate(90)
-        res.move((bumpout_curve.ports[2].x - res.xmin, bumpout_curve.ports[2].y - res.y))
-        res.move((-3*wire_w, 0))
-        via_size = max(heater_w - 1, 1)
-        via_t = pg.rectangle(size=(via_size, via_size), layer=via_layer)
-        via_1 = S << via_t
-        via_2 = S << via_t
-        via_1.move((res.xmin - via_1.xmin + wire_w/2, res.y - via_1.y))
-        via_2.move((res.xmax - via_2.xmax - wire_w/2, res.y - via_2.y))
+        res = S << rg.resistor_with_vias(via_layer=via_layer, res_layer=heater_layer, res_w=heater_w,
+                                         res_sq=1, via_max_w=(bumpout_curve.ports[2].width - 2, None))
+        res.connect(res.ports[1], bumpout_curve.ports[2])
+        res.move((-res.ports[1].width - 0.5, 0))
         snspds.append(D << S)
     # add readout clock taper
     clk_ro_taper = D << pg.outline(pg.optimal_step(start_width=wire_w, end_width=routing_w, symmetric=True),
@@ -550,7 +545,7 @@ def make_device_pair(snspd_count = 3,
             to_edge.connect(to_edge.ports[1], exp_port)
             to_edge.ports[2].name = exp_port.name
             new_exp_ports.append(to_edge.ports[2])
-    routes = rg.autoroute(exp_ports=new_exp_ports, pad_ports=pa.ports, workspace_size=workspace_size,
+    routes = rg.autoroute(exp_ports=new_exp_ports, pad_ports=list(pa.ports.values()), workspace_size=workspace_size,
                           exp_bbox=exp.bbox, width=routing_w, spacing=3*routing_w,
                           pad_offset=pad_outline+2*routing_w, layer=nbn_layer)
     routes = R << pg.outline(routes, distance=dev_outline, open_ports=True, layer=nbn_layer)
@@ -561,11 +556,9 @@ def make_device_pair(snspd_count = 3,
     
 
 D = Device("test")
-#D << multistage_shiftreg(ind_spacings=(10, 5, 10), ind_sq=200)
-#D << shiftreg_snspd_row(ind_spacings=(10, 5, 10), ind_sq=250, snspd_sq=10000)
-#D << make_device_pair(ind_spacings=(15, 5, 15), ind_sq=2000, snspd_w=0.3, snspd_sq=20000)
-#D << make_device_pair(ind_spacings=(10, 5, 10), ind_sq=500, snspd_w=0.3, snspd_sq=10000, routing_w=5, dev_outline=0.45)
-D << make_device_pair(snspd_count=3, ind_sq=500, snspd_w=0.3, snspd_sq=5000, snspd_ff=0.2, wire_w=1)
+#D << multistage_shiftreg(ind_spacing=3, stage_count=3, ind_sq=200)
+#D << shiftreg_snspd_row(ind_sq=500, ind_spacing=30, stage_count=3)
+D << make_device_pair(snspd_count=3, ind_sq=500, snspd_w=0.3, snspd_sq=5000, snspd_ff=0.2, wire_w=1, heater_w=3)
 qp(D)
 input('press any key to exit')
 exit()

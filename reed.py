@@ -43,10 +43,12 @@ def optimal_l(width = 1,
 
     # swap widths and ports to ensure width[1] >= width[0]
     p1, p2 = 1, 2
+    swap = False
     if width[0] >= width[1]:
         # use >= so the default case uses the correct labeling scheme
         width = (width[1], width[0])
         p1, p2 = p2, p1
+        swap = True
 
     a = 2 * width[0]
     log_vmax = np.log10(np.sinh((side_length/1.5-a/2)*np.pi/a))
@@ -64,6 +66,9 @@ def optimal_l(width = 1,
     D.add_port(name=p2, midpoint=[width[0]-width[1]/2, d], width=width[1], orientation=90)
     D.add_port(name=p1, midpoint=[d, width[0]/2], width=width[0], orientation=0)
     D.move((width[1]-width[0],0))
+    if not swap:
+        D.mirror((0,0), (0,1))
+        D.rotate(270)
     return D
 
 def optimal_tee(width = 1,
@@ -98,6 +103,40 @@ def optimal_tee(width = 1,
     D.add_port(name=3, port=conn.ports[2])
     return D
 
+def resistor_with_vias(via_layer = 1,
+                       res_layer = 2,
+                       res_w = 3,
+                       res_sq = 1,
+                       via_max_w = (1, None)):
+    """
+    creates a resistor with via connections
+
+    via_layer   - gds layer for vias
+    res_layer   - gds layer for resistor
+    res_w       - resistor width in microns
+    res_sq      - number of squares in resistor (between vias)
+    via_max_w   - tuple, maximum via width for each port
+    """
+
+    D = Device('resistor_with_vias')
+    vias = []
+    if via_max_w is None:
+        via_max_w = (None, None)
+    if len(via_max_w) != 2:
+        raise ValueError("invalid number of via max widths, please use None or (width1/None, width2/None)")
+    for n, v_wmax in enumerate(via_max_w):
+        via_w = min(v_wmax, res_w - 1) if v_wmax is not None else res_w - 1
+        v = D << pg.rectangle(size=(via_w, via_w), layer=via_layer)
+        dx = -v.xmax - res_sq*res_w/2 if n == 0 else v.xmin + res_sq*res_w/2
+        v.move((dx, -v.y))
+        vias.append(v)
+    D.move((-D.x, -D.y))
+    res = D << pg.rectangle(size=(D.xsize + 1, res_w), layer=res_layer)
+    res.move((-res.x, -res.y))
+    D.add_port(name=1, midpoint=(vias[0].xmin, vias[0].y), width=vias[0].ysize, orientation=180)
+    D.add_port(name=2, midpoint=(vias[1].xmax, vias[1].y), width=vias[1].ysize, orientation=0)
+    return D
+
 def pad_array(num_pads = 8,
               workspace_size = (100, 200),
               pad_size = (200, 250),
@@ -109,6 +148,7 @@ def pad_array(num_pads = 8,
     
     renumbers ports so they follow standard ordering (CW increasing from top left corner)
     option to do negative tone for specific pads on specific layers
+    also optimizes pad count on each side to better fit workspaces with different aspect ratios
     num_pads        - total number of pads (will be evenly divided between the 4 sides
     workspace_size  - tuple, width and height (in microns) of workspace area
     pad_size        - tuple, width and height (in microns) of each pad
@@ -135,6 +175,7 @@ def pad_array(num_pads = 8,
     pads_per_side[3] += top_bottom_pads//2 # north side
     unassigned = num_pads - 2*(top_bottom_pads//2 + left_right_pads//2)
     for i in range(unassigned):
+        # prefer to put extra pads on west/east side
         pads_per_side[i] += 1
     conn_dict = {'W': pads_per_side[0],
                  'E': pads_per_side[1],
@@ -209,12 +250,6 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
     if len(exp_ports) != len(pad_ports):
         raise ValueError("invalid port lists for autorouter, lengths must match")
     num_ports = len(exp_ports)
-    
-    # create ports in final device for the side of the route that connects to the experiment
-    # the ports for the pads will be created later once the routes are determined
-    for n, port in enumerate(exp_ports):
-        D.add_port(name=n, midpoint=port.midpoint, width=port.width,
-                   orientation=(port.orientation + 180) % 360)
 
     # find the pad with the minimum distance to experiment port 0
     # we'll connect these two and connect pairs of ports sequentially around the pad array
@@ -317,12 +352,12 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                     # if exp_port is vertically aligned
                     new_path = Path((exp_p.center, (exp_p.x, pad_p.y)))
                     new_port = Port(name=pad_p.name, midpoint=(exp_p.x, pad_p.y),
-                                    width=width, orientation=(exp_p.orientation + 180) % 360)
+                                    width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
                     pad_p_prev_loc[h_idx] = pad_p.x
                 else:
                     new_path = Path((exp_p.center, (pad_p.x, exp_p.y)))
                     new_port = Port(name=pad_p.name, midpoint=(pad_p.x, exp_p.y),
-                                    width=width, orientation=(exp_p.orientation + 180) % 360)
+                                    width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
                     pad_p_prev_loc[h_idx] = pad_p.y
             else:
                 if q < 2:
@@ -369,7 +404,7 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                     height[h_idx] += spacing if q == 2 else -spacing
                 new_path = Path((exp_p.center, start, mid, end))
                 new_port = Port(name=pad_p.name, midpoint=end,
-                                width=width, orientation=(exp_p.orientation + 180) % 360)
+                                width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
             if paths[q][p] is not None:
                 paths[q][p].append(new_path)
             else:
@@ -382,57 +417,50 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
             try:
                 route = D << pr.route_smooth(port1=port_pair[0], port2=port_pair[1], radius=2*width, width=width,
                                              path_type='manual', manual_path=paths[q][p], layer=layer)
-                D.add_port(name=num_ports + port_pair[1].name, port=route.ports[2])
             except ValueError as e:
                 traceback.print_exc()
+                print('An error occurred with phidl.routing.route_smooth(), try increasing the size of the workspace')
                 print(paths[q][p].points)
-    
+            # add taper
+            pad_p = pad_ports[port_pair[1].name]
+            final_w = port_pair[1].width + 2*(abs(route.ports[2].x - pad_p.x) + abs(route.ports[2].y - pad_p.y))
+            ht = Device("chopped_hyper_taper")
+            taper = ht << qg.hyper_taper(length=2*width, wide_section=final_w + width, narrow_section=width, layer=layer)
+            cut = ht << pg.straight(size=(pad_p.width + width, 2*width))
+            conn = ht << pg.connector(width=pad_p.width)
+            taper.connect(taper.ports[1], route.ports[2])
+            conn.connect(conn.ports[1], pad_p)
+            cut.connect(cut.ports[1], conn.ports[1])
+            D << pg.boolean(A=taper, B=cut, operation='and', precision=1e-6, layer=layer)
+    D = pg.union(D)
+    # create ports in final device for the side of the route that connects to the experiment
+    # the ports for the pads will be created later once the routes are determined
+    for n, port in enumerate(exp_ports):
+        D.add_port(name=n, midpoint=port.midpoint, width=port.width,
+                   orientation=(port.orientation + 180) % 360)
+    for n, port in enumerate(pad_ports):
+        o = port.orientation
+        dx = -2*width if o == 0 else 2*width if o == 180 else 0
+        dy = -2*width if o == 90 else 2*width if o == 270 else 0
+        D.add_port(name=num_ports + n, midpoint=(port.x + dx, port.y + dy), width=port.width + width,
+                   orientation=(port.orientation + 180) % 360)
     return D
-
-def paths_intersect(path1, path2):
-    # 2d "cross product"/determinant
-    cross2d = lambda v1, v2: v1[0]*v2[1] - v1[1]*v2[0]
-    if (path1.xmin < path2.xmax and path1.xmax > path2.xmin and path1.ymin < path2.ymax and path1.ymax > path2.ymin):
-        # bboxes intersect, iterate over segments to check if they intersect
-        for p1 in range(len(path1.points) - 1):
-            for p2 in range(len(path2.points) - 1):
-                p = path1.points[p1]
-                q = path2.points[p2]
-                r = path1.points[p1 + 1] - path1.points[p1]
-                s = path2.points[p2 + 1] - path2.points[p2]
-                rxs = cross2d(r, s)
-                if abs(rxs) < 1e-9:
-                    # lines are parallel
-                    if abs(cross2d(q - p, r)) < 1e-9:
-                        # collinear
-                        t0 = np.dot(q - p, r) / np.dot(r, r)
-                        t1 = t0 + np.dot(s, r) / np.dot(r, r)
-                        if (t0 <= 1 and t0 >= 0) or (t1 <= 1 and t1 >= 0) or (t1 >= 1 and t0 <= 0) or (t0 >= 1 and t1 <= 0):
-                            # lines overlap
-                            return True
-                else:
-                    t = cross2d(q - p, r) / rxs
-                    u = cross2d(q - p, s) / rxs
-                    if t <= 1 and t >= 0 and u <= 1 and u >= 0:
-                        # lines intersect
-                        return True
-        return False
-
-    else:
-        return False
 
 if __name__ == "__main__":
     # simple unit test
     D = Device("test")
     #D << qg.pad_array(pad_iso=True, de_etch=True)
     #D << qg.pad_array(num=8, outline=10, layer=2)
-    D << pad_array(num_pads=22, workspace_size=(500, 800), pad_layers=tuple(1 for i in range(22)), outline=10, pos_tone={1:True})
+    #D << pad_array(num_pads=22, workspace_size=(500, 800), pad_layers=tuple(1 for i in range(22)), outline=10, pos_tone={1:True})
     #D << optimal_l(width=(1,1))
     #D << optimal_l(width=(1,3))
     #D << optimal_l(width=(5,1))
     #D << optimal_tee(width=(1,1))
     #D << optimal_tee(width=(1,5))
     #D << pg.optimal_hairpin(width=1, pitch=1.2, length=5, turn_ratio=2, num_pts=100)
+    #D << resistor_with_vias(via_layer=1, res_layer=2, res_w=3, res_sq=1, via_max_w=(1, None))
+    D << pg.straight(size=(4,2))
+    D << pg.straight(size=(3,9))
     D.distribute(direction = 'y', spacing = 10)
     qp(D)
     input('press any key to exit')
