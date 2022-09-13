@@ -479,8 +479,8 @@ def make_device_pair(onchip_bias = True,
                      drain_sq = 10,
                      source_sq = 5):
     D = Device('shiftreg_experiment')
-    # half of devices get snspd inputs, the other half just get a wire
     E = Device('experiment')
+    R = Device('routes')
     shiftregs = []
     port_offset = 0
     for snspd in (True, False):
@@ -510,26 +510,8 @@ def make_device_pair(onchip_bias = True,
         port_offset += len(shiftreg.ports.items())
     E.move((-E.x, -E.y))
     exp = D << E
-    if onchip_bias:
-        # add onchip bias network
-        for shiftreg in shiftregs:
-            # for
-            pass
-    else:
-        snspd_pad_count = snspd_count
-        ntron_pad_count = 2*snspd_count + 1
-        pad_count = (snspd_pad_count + ntron_pad_count)*2
-    workspace_size = (1.5*E.xsize, 1.7*E.ysize)
-    pad_array = rg.pad_array(num_pads=pad_count, workspace_size=workspace_size,
-                             pad_layers=tuple(nbn_pad_layer for i in range(pad_count)),
-                             outline=pad_outline,
-                             pad_size=(200,250),
-                             pos_tone= {nbn_pad_layer: True})
-    pa = D << pad_array
-    # route from devices to pad array
-    R = Device('routes')
     new_exp_ports = []
-    for i in range(pad_count):
+    for i in range(len(exp.ports)):
         exp_port = exp.ports[i]
         ep_n = exp_port.normal[1] - exp_port.center
         if np.dot(ep_n, (1,0)) == 0:
@@ -547,11 +529,41 @@ def make_device_pair(onchip_bias = True,
                 # left
                 straight_len = exp_port.center[0] - exp.xmin
         if straight_len > 0:
-            to_edge = R << pg.outline(pg.straight(size=(routing_w, straight_len)),
-                                      distance=dev_outline, open_ports=True, layer=nbn_layer)
+            s = pg.straight(size=(routing_w, straight_len))
+            if onchip_bias:
+                p = s.ports[2]
+                s.remove(s.ports[2])
+            ol = pg.outline(s, distance=dev_outline, open_ports=True, layer=nbn_layer)
+            if onchip_bias:
+                ol.add_port(name=p.name, port=p)
+            to_edge = R << ol
             to_edge.connect(to_edge.ports[1], exp_port)
             to_edge.ports[2].name = exp_port.name
             new_exp_ports.append(to_edge.ports[2])
+    output_ports = [len(shiftregs[0].ports) - 2]
+    output_ports.append(output_ports[0] + len(shiftregs[1].ports))
+    if onchip_bias:
+        # add onchip bias network
+        stage_count = 2*snspd_count - 1
+        for shiftreg in shiftregs:
+            for port in new_exp_ports:
+                if (port.name in output_ports):
+                    continue
+                res = R << rg.resistor_with_vias(via_layer=via_layer, res_layer=heater_layer, res_w=2,
+                                                 res_sq=50, via_max_w=(routing_w, routing_w), max_height=100,
+                                                 meander_spacing=0.25)
+                res.connect(res.ports[2], port)
+                res.move(-2*(port.normal - port.center)[1])
+        pad_count = 10
+    else:
+        pad_count = len(exp.ports)
+    workspace_size = (1.5*E.xsize, 1.9*E.ysize)
+    pad_array = rg.pad_array(num_pads=pad_count, workspace_size=workspace_size,
+                             pad_layers=tuple(nbn_pad_layer for i in range(pad_count)),
+                             outline=pad_outline,
+                             pad_size=(200,250),
+                             pos_tone= {nbn_pad_layer: True})
+    pa = D << pad_array
     routes = rg.autoroute(exp_ports=new_exp_ports, pad_ports=list(pa.ports.values()), workspace_size=workspace_size,
                           exp_bbox=exp.bbox, width=routing_w, spacing=2.5*routing_w,
                           pad_offset=pad_outline+routing_w, layer=nbn_layer)
@@ -566,7 +578,8 @@ D = Device("test")
 #D << multistage_shiftreg(ind_spacing=3, stage_count=3, ind_sq=200)
 #D << shiftreg_snspd_row(ind_sq=500, ind_spacing=30, stage_count=3)
 #D << shiftreg_snspd_row(stage_count=3, snspd=True, ind_sq=500, snspd_w=0.3, snspd_sq=10000, snspd_ff=0.2, wire_w=1, heater_w=3, routing_w=5)
-D << make_device_pair(onchip_bias=False, snspd_count=2, ind_sq=500, snspd_w=0.3, snspd_sq=10000, snspd_ff=0.2, wire_w=1, heater_w=3, routing_w=5)
+#D << make_device_pair(onchip_bias=True, snspd_count=2, ind_sq=500, snspd_w=0.3, snspd_sq=10000, snspd_ff=0.2, wire_w=1, heater_w=3, routing_w=5)
+D << make_device_pair(onchip_bias=False, snspd_count=3, ind_sq=500, snspd_w=0.3, snspd_sq=10000, snspd_ff=0.2, wire_w=1, heater_w=3, routing_w=5)
 qp(D)
 input('press any key to exit')
 exit()
