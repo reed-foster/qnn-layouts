@@ -107,7 +107,8 @@ def resistor_with_vias(via_layer = 1,
                        res_layer = 2,
                        res_w = 3,
                        res_sq = 1,
-                       via_max_w = (1, None)):
+                       via_max_w = (1, None),
+                       max_height = None):
     """
     creates a resistor with via connections
 
@@ -115,24 +116,67 @@ def resistor_with_vias(via_layer = 1,
     res_layer   - gds layer for resistor
     res_w       - resistor width in microns
     res_sq      - number of squares in resistor (between vias)
-    via_max_w   - tuple, maximum via width for each port
+    via_max_w   - tuple, maximum via width for each port (if none, then use res_w - 1)
+    max_height  - max height of resistor in microns (create meanders if max_height is not None and res_w*res_sq > max_height)
     """
 
     D = Device('resistor_with_vias')
-    vias = []
+
+    # check arguments
     if via_max_w is None:
         via_max_w = (None, None)
     if len(via_max_w) != 2:
         raise ValueError("invalid number of via max widths, please use None or (width1/None, width2/None)")
+
+    # determine meander count based on max_height
+    n_meander = 0
+    hp_n = lambda n: res_w/2*(res_sq - 4*n - (2*n - 1)*height/res_w)
+    if max_height is None or res_w*res_sq < max_height:
+        height = res_w*res_sq
+    else:
+        height = max_height
+        # num squares = (2*
+        while hp_n(n_meander) > height:
+            n_meander += 1
+        if hp_n(n_meander) < 0:
+            n_meander -= 1
+
+
+    vias = []
     for n, v_wmax in enumerate(via_max_w):
         via_w = min(v_wmax, res_w - 1) if v_wmax is not None else res_w - 1
         v = D << pg.rectangle(size=(via_w, via_w), layer=via_layer)
-        dx = -v.xmax - res_sq*res_w/2 if n == 0 else v.xmin + res_sq*res_w/2
+        dx = -v.xmax - height/2 if n == 0 else v.xmin + height/2
         v.move((dx, -v.y))
         vias.append(v)
-    D.move((-D.x, -D.y))
-    res = D << pg.rectangle(size=(D.xsize + 1, res_w), layer=res_layer)
-    res.move((-res.x, -res.y))
+    vias[1].move((0, 4*n_meander*res_w))
+    res_long = pg.rectangle(size=(height + 2*res_w, res_w), layer=res_layer)
+    res_short = pg.rectangle(size=(hp_n(n_meander) + 2*res_w, res_w), layer=res_layer)
+    conn = pg.rectangle(size=(res_w, 3*res_w), layer=res_layer)
+    # handle case where no meander is used
+    if n_meander == 0:
+        r = D << res_long
+        r.move((-r.x, -r.y))
+    # create max length meanders
+    for i in range(2*n_meander - 1):
+        r = D << res_long
+        c = D << conn
+        dy = 4*n_meander*res_w - 2*res_w*i
+        r.move((-r.x, -r.y + dy))
+        if i % 2 == 0:
+            c.move((vias[0].xmax - c.xmax, -c.ymax + res_w/2 + dy))
+        else:
+            c.move((vias[1].xmin - c.xmin, -c.ymax + res_w/2 + dy))
+    # create short meanders
+    if n_meander > 0:
+        for i in range(2):
+            r = D << res_short
+            r.move((vias[0].xmax - r.xmin - res_w, -r.y + 2*res_w*i))
+            if i == 0:
+                c = D << conn
+                c.move((vias[0].xmax - c.xmin + hp_n(n_meander), -c.ymin - res_w/2))
+    #D.move((-D.x, -D.y))
+    D = pg.union(D, by_layer=True)
     D.add_port(name=1, midpoint=(vias[0].xmin, vias[0].y), width=vias[0].ysize, orientation=180)
     D.add_port(name=2, midpoint=(vias[1].xmax, vias[1].y), width=vias[1].ysize, orientation=0)
     return D
@@ -364,12 +408,21 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                     # select height index based on difference in x coordinate (i.e. do we need to go left or right?)
                     # zero: left, one: right
                     h_idx = 0 if exp_p.x > pad_p.x else 1
-                    if ((exp_p.x < pad_p_prev_loc[h_idx] - spacing and h_idx == 0)
-                            or (exp_p.x > pad_p_prev_loc[h_idx] + spacing and h_idx == 1)
-                            or (pad_p.x > exp_p_prev_loc[h_idx] + spacing and h_idx == 0)
-                            or (pad_p.x < exp_p_prev_loc[h_idx] - spacing and h_idx == 1)):
-                        # height should be reset, since we're past the previous pad
-                        height[h_idx] = pad_offset if q == 0 else -pad_offset
+                    # reset height if we're clear of adjacent routes
+                    if h_idx == 0:
+                        # moving leftwards
+                        for pair_p in sorted(quadrant, key = lambda a: a[1].x):
+                            if pair_p[1].x > pad_p.x:
+                                break
+                        if pair_p[1].x - pair_p[1].width/3 > exp_p.x:
+                            height[h_idx] = pad_offset if q == 0 else -pad_offset
+                    else:
+                        # moving rightwards
+                        for pair_p in sorted(quadrant, key = lambda a: -a[1].x):
+                            if pair_p[1].x < pad_p.x:
+                                break
+                        if pair_p[1].x + pair_p[1].width/3 < exp_p.x:
+                            height[h_idx] = pad_offset if q == 0 else -pad_offset
                     start = (exp_p.x, pad_p.y - height[h_idx])
                     # check if we should keep going (i.e. is |pad_p.x - exp_p.x| too small to fit a bend)
                     if h_idx == 0:
@@ -385,12 +438,21 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                     # select height index based on difference in y coordinate (i.e. do we need to go up or down?)
                     # zero: down, one: up
                     h_idx = 0 if exp_p.y > pad_p.y else 1
-                    if ((exp_p.y < pad_p_prev_loc[h_idx] - spacing and h_idx == 0)
-                            or (exp_p.y > pad_p_prev_loc[h_idx] + spacing and h_idx == 1)
-                            or (pad_p.y > exp_p_prev_loc[h_idx] + spacing and h_idx == 0)
-                            or (pad_p.y < exp_p_prev_loc[h_idx] - spacing and h_idx == 1)):
-                        # height should be reset, since we're past the previous pad
-                        height[h_idx] = pad_offset if q == 2 else -pad_offset
+                    # reset height if we're clear of adjacent routes
+                    if h_idx == 0:
+                        # moving downwards
+                        for pair_p in sorted(quadrant, key = lambda a: a[1].y):
+                            if pair_p[1].y > pad_p.y:
+                                break
+                        if pair_p[1].y - pair_p[1].width/3 > exp_p.y:
+                            height[h_idx] = pad_offset if q == 2 else -pad_offset
+                    else:
+                        # moving upwards
+                        for pair_p in sorted(quadrant, key = lambda a: -a[1].y):
+                            if pair_p[1].y < pad_p.y:
+                                break
+                        if pair_p[1].y + pair_p[1].width/3 < exp_p.y:
+                            height[h_idx] = pad_offset if q == 2 else -pad_offset
                     start = (pad_p.x - height[h_idx], exp_p.y)
                     # check if we should keep going (i.e. is |pad_p.y - exp_p.y| too small to fit a bend)
                     if h_idx == 0:
@@ -433,8 +495,7 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
             cut.connect(cut.ports[1], conn.ports[1])
             D << pg.boolean(A=taper, B=cut, operation='and', precision=1e-6, layer=layer)
     D = pg.union(D)
-    # create ports in final device for the side of the route that connects to the experiment
-    # the ports for the pads will be created later once the routes are determined
+    # create ports in final device so pg.outline doesn't block them
     for n, port in enumerate(exp_ports):
         D.add_port(name=n, midpoint=port.midpoint, width=port.width,
                    orientation=(port.orientation + 180) % 360)
@@ -458,9 +519,10 @@ if __name__ == "__main__":
     #D << optimal_tee(width=(1,1))
     #D << optimal_tee(width=(1,5))
     #D << pg.optimal_hairpin(width=1, pitch=1.2, length=5, turn_ratio=2, num_pts=100)
-    #D << resistor_with_vias(via_layer=1, res_layer=2, res_w=3, res_sq=1, via_max_w=(1, None))
-    D << pg.straight(size=(4,2))
-    D << pg.straight(size=(3,9))
+    #D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=50, via_max_w=None, max_height=50)
+    D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=20, via_max_w=None, max_height=10)
+    #D << pg.straight(size=(4,2))
+    #D << pg.straight(size=(3,9))
     D.distribute(direction = 'y', spacing = 10)
     qp(D)
     input('press any key to exit')
