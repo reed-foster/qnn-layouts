@@ -108,16 +108,18 @@ def resistor_with_vias(via_layer = 1,
                        res_w = 3,
                        res_sq = 1,
                        via_max_w = (1, None),
-                       max_height = None):
+                       max_height = None,
+                       meander_spacing = 1):
     """
     creates a resistor with via connections
 
-    via_layer   - gds layer for vias
-    res_layer   - gds layer for resistor
-    res_w       - resistor width in microns
-    res_sq      - number of squares in resistor (between vias)
-    via_max_w   - tuple, maximum via width for each port (if none, then use res_w - 1)
-    max_height  - max height of resistor in microns (create meanders if max_height is not None and res_w*res_sq > max_height)
+    via_layer       - gds layer for vias
+    res_layer       - gds layer for resistor
+    res_w           - resistor width in microns
+    res_sq          - number of squares in resistor (between vias)
+    via_max_w       - tuple, maximum via width for each port (if none, then use res_w - 1)
+    max_height      - max height of resistor in microns (create meanders if max_height is not None and res_w*res_sq > max_height)
+    meander_spacing - spacing between meanders in number of squares
     """
 
     D = Device('resistor_with_vias')
@@ -130,7 +132,7 @@ def resistor_with_vias(via_layer = 1,
 
     # determine meander count based on max_height
     n_meander = 0
-    hp_n = lambda n: res_w/2*(res_sq - 4*n - (2*n - 1)*height/res_w)
+    hp_n = lambda n: res_w/2*(res_sq - 2*(1 + meander_spacing)*n - (2*n - 1)*height/res_w)
     if max_height is None or res_w*res_sq < max_height:
         height = res_w*res_sq
     else:
@@ -149,10 +151,10 @@ def resistor_with_vias(via_layer = 1,
         dx = -v.xmax - height/2 if n == 0 else v.xmin + height/2
         v.move((dx, -v.y))
         vias.append(v)
-    vias[1].move((0, 4*n_meander*res_w))
+    vias[1].move((0, 2*(1 + meander_spacing)*n_meander*res_w))
     res_long = pg.rectangle(size=(height + 2*res_w, res_w), layer=res_layer)
     res_short = pg.rectangle(size=(hp_n(n_meander) + 2*res_w, res_w), layer=res_layer)
-    conn = pg.rectangle(size=(res_w, 3*res_w), layer=res_layer)
+    conn = pg.rectangle(size=(res_w, (2 + meander_spacing)*res_w), layer=res_layer)
     # handle case where no meander is used
     if n_meander == 0:
         r = D << res_long
@@ -161,7 +163,7 @@ def resistor_with_vias(via_layer = 1,
     for i in range(2*n_meander - 1):
         r = D << res_long
         c = D << conn
-        dy = 4*n_meander*res_w - 2*res_w*i
+        dy = 2*(1 + meander_spacing)*n_meander*res_w - (1 + meander_spacing)*res_w*i
         r.move((-r.x, -r.y + dy))
         if i % 2 == 0:
             c.move((vias[0].xmax - c.xmax, -c.ymax + res_w/2 + dy))
@@ -171,7 +173,7 @@ def resistor_with_vias(via_layer = 1,
     if n_meander > 0:
         for i in range(2):
             r = D << res_short
-            r.move((vias[0].xmax - r.xmin - res_w, -r.y + 2*res_w*i))
+            r.move((vias[0].xmax - r.xmin - res_w, -r.y + (1 + meander_spacing)*res_w*i))
             if i == 0:
                 c = D << conn
                 c.move((vias[0].xmax - c.xmin + hp_n(n_meander), -c.ymin - res_w/2))
@@ -520,7 +522,7 @@ if __name__ == "__main__":
     #D << optimal_tee(width=(1,5))
     #D << pg.optimal_hairpin(width=1, pitch=1.2, length=5, turn_ratio=2, num_pts=100)
     #D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=50, via_max_w=None, max_height=50)
-    D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=20, via_max_w=None, max_height=10)
+    D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=50, via_max_w=None, max_height=80)
     #D << pg.straight(size=(4,2))
     #D << pg.straight(size=(3,9))
     D.distribute(direction = 'y', spacing = 10)
