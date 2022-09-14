@@ -479,7 +479,7 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
     for q, quadrant in enumerate(grouped_pairs):
         for p, port_pair in enumerate(quadrant):
             try:
-                route = D << pr.route_smooth(port1=port_pair[0], port2=port_pair[1], radius=2*width, width=width,
+                route = D << pr.route_smooth(port1=port_pair[0], port2=port_pair[1], radius=1.5*width, width=width,
                                              path_type='manual', manual_path=paths[q][p], layer=layer)
             except ValueError as e:
                 traceback.print_exc()
@@ -515,14 +515,14 @@ if __name__ == "__main__":
     #D << qg.pad_array(pad_iso=True, de_etch=True)
     #D << qg.pad_array(num=8, outline=10, layer=2)
     #D << pad_array(num_pads=22, workspace_size=(500, 800), pad_layers=tuple(1 for i in range(22)), outline=10, pos_tone={1:True})
-    #D << optimal_l(width=(1,1))
-    #D << optimal_l(width=(1,3))
-    #D << optimal_l(width=(5,1))
+    D << optimal_l(width=(1,1))
+    D << optimal_l(width=(1,3))
+    D << optimal_l(width=(5,1))
     #D << optimal_tee(width=(1,1))
     #D << optimal_tee(width=(1,5))
     #D << pg.optimal_hairpin(width=1, pitch=1.2, length=5, turn_ratio=2, num_pts=100)
     #D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=50, via_max_w=None, max_height=50)
-    D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=50, via_max_w=None, max_height=80)
+    #D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=50, via_max_w=None, max_height=80)
     #D << pg.straight(size=(4,2))
     #D << pg.straight(size=(3,9))
     D.distribute(direction = 'y', spacing = 10)
