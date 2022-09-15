@@ -355,7 +355,7 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
         # since orthogonal ports are sorted based on how close they are to the edge of the bbox
         # processing them in sorted order and incrementing height appropriately will prevent collisions
         height = [0, 0]
-        for port_pair in sorted(quadrant, key = pair_key):
+        for port_pair in sorted(quadrant, key = lambda p: -abs(p[0].x) if q < 2 else -abs(p[0].y)):
             exp_p = port_pair[0]
             pad_p = port_pair[1]
             if q < 2:
@@ -378,124 +378,132 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
             grouped_pairs[new_q].append((new_port, pad_p, exp_p))
             paths[new_q].append(path)
     
-    # now all ports face each other and the automatic routing will be straightforward
+    # split each quadrant of pairs into sections which can be routed independently
+    sectioned_pairs = [[], [], [], []]
+    sectioned_paths = [[], [], [], []]
     for q, quadrant in enumerate(grouped_pairs):
-        # keep track of height on both halves of experiment face
-        # halves are based on x/y distance of pad_p and exp_p
-        if q % 2 == 0:
-            height = [pad_offset, pad_offset]
-        else:
-            height = [-pad_offset, -pad_offset]
-        pad_p_prev_loc = [-1e9, 1e9] # keep track of previous pad x/y coordinate
-        exp_p_prev_loc = [-1e9, 1e9]
-        for p, port_pair in sorted(enumerate(quadrant), key = lambda a: pair_key(a[1])):
-            exp_p = port_pair[0]
-            pad_p = port_pair[1]
-            if pair_key(port_pair) < pad_p.width/3:
-                # pair key gets the x distance between vertically aligned ports and
-                # y distance for horizontally aligned ports
-                if q < 2:
-                    # if exp_port is vertically aligned
-                    new_path = Path((exp_p.center, (exp_p.x, pad_p.y)))
-                    new_port = Port(name=pad_p.name, midpoint=(exp_p.x, pad_p.y),
-                                    width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
-                    pad_p_prev_loc[h_idx] = pad_p.x
-                else:
-                    new_path = Path((exp_p.center, (pad_p.x, exp_p.y)))
-                    new_port = Port(name=pad_p.name, midpoint=(pad_p.x, exp_p.y),
-                                    width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
-                    pad_p_prev_loc[h_idx] = pad_p.y
+        last_direction = None
+        for p, port_pair in sorted(enumerate(quadrant), key = lambda a: a[1][0].x if q < 2 else a[1][0].y):
+            # sorted based on exp_port x coord (-x to +x) for top and bottom sides
+            # based on exp_port y coord (-y to +y) for left and right sides
+            direction = np.sign(port_pair[1].x - port_pair[0].x) if q < 2 else np.sign(port_pair[1].y - port_pair[0].y)
+            new_section = False
+            if direction != last_direction or last_direction is None:
+                new_section = True
             else:
-                if q < 2:
-                    # select height index based on difference in x coordinate (i.e. do we need to go left or right?)
-                    # zero: left, one: right
-                    h_idx = 0 if exp_p.x > pad_p.x else 1
-                    # reset height if we're clear of adjacent routes
-                    if h_idx == 0:
-                        # moving leftwards
-                        for pair_p in sorted(quadrant, key = lambda a: a[1].x):
-                            if pair_p[1].x > pad_p.x:
-                                break
-                        if pair_p[1].x - pair_p[1].width/3 > exp_p.x:
-                            height[h_idx] = pad_offset if q == 0 else -pad_offset
-                    else:
-                        # moving rightwards
-                        for pair_p in sorted(quadrant, key = lambda a: -a[1].x):
-                            if pair_p[1].x < pad_p.x:
-                                break
-                        if pair_p[1].x + pair_p[1].width/3 < exp_p.x:
-                            height[h_idx] = pad_offset if q == 0 else -pad_offset
-                    start = (exp_p.x, pad_p.y - height[h_idx])
-                    # check if we should keep going (i.e. is |pad_p.x - exp_p.x| too small to fit a bend)
-                    if h_idx == 0:
-                        end_x = max(min(pad_p.x, exp_p.x - 5*width), pad_p.x - pad_p.width/3)
-                    else:
-                        end_x = min(max(pad_p.x, exp_p.x + 5*width), pad_p.x + pad_p.width/3)
-                    mid = (end_x, pad_p.y - height[h_idx])
-                    end = (end_x, pad_p.y)
-                    pad_p_prev_loc[h_idx] = pad_p.x
-                    exp_p_prev_loc[h_idx] = exp_p.x
-                    height[h_idx] += spacing if q == 0 else -spacing
+                pad_port = port_pair[1]
+                exp_port = port_pair[0]
+                prev_pad_port = sectioned_pairs[q][-1][-1][1]
+                prev_exp_port = sectioned_pairs[q][-1][-1][0]
+                if direction == 1:
+                    # moving rightwards/upwards
+                    if q < 2 and exp_port.x > prev_pad_port.x + prev_pad_port.width/3:
+                        new_section = True
+                    elif q >= 2 and exp_port.y > prev_pad_port.y + prev_pad_port.width/3:
+                        new_section = True
+                    if q < 2 and pad_port.x + prev_pad_port.width/3 < prev_exp_port.x:
+                        new_section = True
+                    elif q >= 2 and pad_port.y + prev_pad_port.width/3 < prev_exp_port.y:
+                        new_section = True
+                elif direction == -1:
+                    # moving leftwards/downwards
+                    if q < 2 and exp_port.x < prev_pad_port.x - prev_pad_port.width/3:
+                        new_section = True
+                    elif q >= 2 and exp_port.y < prev_pad_port.y - prev_pad_port.width/3:
+                        new_section = True
+                    if q < 2 and pad_port.x - prev_pad_port.width/3 > prev_exp_port.x:
+                        new_section = True
+                    elif q >= 2 and pad_port.y - prev_pad_port.width/3 > prev_exp_port.y:
+                        new_section = True
                 else:
-                    # select height index based on difference in y coordinate (i.e. do we need to go up or down?)
-                    # zero: down, one: up
-                    h_idx = 0 if exp_p.y > pad_p.y else 1
-                    # reset height if we're clear of adjacent routes
-                    if h_idx == 0:
-                        # moving downwards
-                        for pair_p in sorted(quadrant, key = lambda a: a[1].y):
-                            if pair_p[1].y > pad_p.y:
-                                break
-                        if pair_p[1].y - pair_p[1].width/3 > exp_p.y:
-                            height[h_idx] = pad_offset if q == 2 else -pad_offset
-                    else:
-                        # moving upwards
-                        for pair_p in sorted(quadrant, key = lambda a: -a[1].y):
-                            if pair_p[1].y < pad_p.y:
-                                break
-                        if pair_p[1].y + pair_p[1].width/3 < exp_p.y:
-                            height[h_idx] = pad_offset if q == 2 else -pad_offset
-                    start = (pad_p.x - height[h_idx], exp_p.y)
-                    # check if we should keep going (i.e. is |pad_p.y - exp_p.y| too small to fit a bend)
-                    if h_idx == 0:
-                        end_y = max(min(pad_p.y, exp_p.y - 5*width), pad_p.y - pad_p.width/3)
-                    else:
-                        end_y = min(max(pad_p.y, exp_p.y + 5*width), pad_p.y + pad_p.width/3)
-                    mid = (pad_p.x - height[h_idx], end_y)
-                    end = (pad_p.x, end_y)
-                    pad_p_prev_loc[h_idx] = pad_p.y
-                    exp_p_prev_loc[h_idx] = exp_p.y
-                    height[h_idx] += spacing if q == 2 else -spacing
-                new_path = Path((exp_p.center, start, mid, end))
-                new_port = Port(name=pad_p.name, midpoint=end,
-                                width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
-            if paths[q][p] is not None:
-                paths[q][p].append(new_path)
-            else:
-                paths[q][p] = new_path
-            grouped_pairs[q][p] = (exp_p, new_port)
+                    new_section = True
+            if new_section:
+                sectioned_pairs[q].append([])
+                sectioned_paths[q].append([])
+            sectioned_pairs[q][-1].append(port_pair)
+            sectioned_paths[q][-1].append(paths[q][p])
+            last_direction = direction
 
+    # now all ports face each other and the automatic routing will be straightforward
+    for q, quadrant in enumerate(sectioned_pairs):
+        for s, section in enumerate(quadrant):
+            pad_dist = pad_offset
+            direction = np.sign(section[0][1].x - section[0][0].x) if q < 2 else np.sign(section[0][1].y - section[0][0].y)
+            for p, port_pair in sorted(enumerate(section), key = lambda a: direction*(a[1][0].x if q < 2 else a[1][0].y)):
+                exp_p = port_pair[0]
+                pad_p = port_pair[1]
+                if q < 2:
+                    # ports are vertically aligned
+                    if abs(exp_p.x - pad_p.x) < pad_p.width/3:
+                        # ports are close enough to route together with a straight
+                        new_path = Path((exp_p.center, (exp_p.x, pad_p.y)))
+                        new_port = Port(name=pad_p.name, midpoint=(exp_p.x, pad_p.y),
+                                        width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
+                    else:
+                        direction = np.sign(port_pair[1].x - port_pair[0].x)
+                        start = np.array((exp_p.x, pad_p.y))
+                        start += (0, -pad_dist if q == 0 else pad_dist)
+                        if direction < 0:
+                            # routing leftwards
+                            end_x = max(min(pad_p.x, exp_p.x - 5*width), pad_p.x - pad_p.width/3)
+                        else:
+                            end_x = min(max(pad_p.x, exp_p.x + 5*width), pad_p.x + pad_p.width/3)
+                        mid = np.array((end_x, start[1]))
+                        end = (end_x, pad_p.y)
+                        pad_dist += spacing
+                        new_path = Path((exp_p.center, start, mid, end))
+                        new_port = Port(name=pad_p.name, midpoint=end,
+                                        width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
+
+                else:
+                    # ports are horizontally aligned
+                    if abs(exp_p.y - pad_p.y) < pad_p.width/3:
+                        # ports are close enough to route together with a straight
+                        new_path = Path((exp_p.center, (pad_p.x, exp_p.y)))
+                        new_port = Port(name=pad_p.name, midpoint=(pad_p.x, exp_p.y),
+                                        width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
+                    else:
+                        direction = np.sign(port_pair[1].y - port_pair[0].y)
+                        start = np.array((pad_p.x, exp_p.y))
+                        start += (-pad_dist if q == 2 else pad_dist, 0)
+                        if direction < 0:
+                            # routing leftwards
+                            end_y = max(min(pad_p.y, exp_p.y - 5*width), pad_p.y - pad_p.width/3)
+                        else:
+                            end_y = min(max(pad_p.y, exp_p.y + 5*width), pad_p.y + pad_p.width/3)
+                        mid = np.array((start[0], end_y))
+                        end = (pad_p.x, end_y)
+                        pad_dist += spacing
+                        new_path = Path((exp_p.center, start, mid, end))
+                        new_port = Port(name=pad_p.name, midpoint=end,
+                                        width=pad_p.width, orientation=(exp_p.orientation + 180) % 360)
+                if sectioned_paths[q][s][p] is not None:
+                    sectioned_paths[q][s][p].append(new_path)
+                else:
+                    sectioned_paths[q][s][p] = new_path
+                sectioned_pairs[q][s][p] = (exp_p, new_port)
     # perform routing along path and add final ports to connect to pad array
-    for q, quadrant in enumerate(grouped_pairs):
-        for p, port_pair in enumerate(quadrant):
-            try:
-                route = D << pr.route_smooth(port1=port_pair[0], port2=port_pair[1], radius=1.5*width, width=width,
-                                             path_type='manual', manual_path=paths[q][p], layer=layer)
-            except ValueError as e:
-                traceback.print_exc()
-                print('An error occurred with phidl.routing.route_smooth(), try increasing the size of the workspace')
-                print(paths[q][p].points)
-            # add taper
-            pad_p = pad_ports[port_pair[1].name]
-            final_w = port_pair[1].width + 2*(abs(route.ports[2].x - pad_p.x) + abs(route.ports[2].y - pad_p.y))
-            ht = Device("chopped_hyper_taper")
-            taper = ht << qg.hyper_taper(length=2*width, wide_section=final_w + width, narrow_section=width, layer=layer)
-            cut = ht << pg.straight(size=(pad_p.width + width, 2*width))
-            conn = ht << pg.connector(width=pad_p.width)
-            taper.connect(taper.ports[1], route.ports[2])
-            conn.connect(conn.ports[1], pad_p)
-            cut.connect(cut.ports[1], conn.ports[1])
-            D << pg.boolean(A=taper, B=cut, operation='and', precision=1e-6, layer=layer)
+    for q, quadrant in enumerate(sectioned_pairs):
+        for s, section in enumerate(quadrant):
+            for p, port_pair in enumerate(section):
+                try:
+                    route = D << pr.route_smooth(port1=port_pair[0], port2=port_pair[1], radius=1.5*width, width=width,
+                                                 path_type='manual', manual_path=sectioned_paths[q][s][p], layer=layer)
+                except ValueError as e:
+                    traceback.print_exc()
+                    print('An error occurred with phidl.routing.route_smooth(), try increasing the size of the workspace')
+                    print(sectioned_paths[q][s][p].points)
+                # add taper
+                pad_p = pad_ports[port_pair[1].name]
+                final_w = port_pair[1].width + 2*(abs(route.ports[2].x - pad_p.x) + abs(route.ports[2].y - pad_p.y))
+                ht = Device("chopped_hyper_taper")
+                taper = ht << qg.hyper_taper(length=2*width, wide_section=final_w + width, narrow_section=width, layer=layer)
+                cut = ht << pg.straight(size=(pad_p.width + width, 2*width))
+                conn = ht << pg.connector(width=pad_p.width)
+                taper.connect(taper.ports[1], route.ports[2])
+                conn.connect(conn.ports[1], pad_p)
+                cut.connect(cut.ports[1], conn.ports[1])
+                D << pg.boolean(A=taper, B=cut, operation='and', precision=1e-6, layer=layer)
     D = pg.union(D)
     # create ports in final device so pg.outline doesn't block them
     for n, port in enumerate(exp_ports):

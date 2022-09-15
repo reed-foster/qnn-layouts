@@ -665,7 +665,7 @@ def make_device_pair(onchip_bias = True,
     output_ports = [len(shiftregs[0].ports) - 2]
     output_ports.append(output_ports[0] + len(shiftregs[1].ports))
     pad_count = len(exp.ports)
-    workspace_size = (1.5*E.xsize, 1.9*E.ysize)
+    workspace_size = (1.6*E.xsize, 1.5*E.ysize)
     pad_array = rg.pad_array(num_pads=pad_count, workspace_size=workspace_size,
                              pad_layers=tuple(nbn_pad_layer for i in range(pad_count)),
                              outline=pad_outline,
@@ -676,6 +676,8 @@ def make_device_pair(onchip_bias = True,
                           exp_bbox=exp.bbox, width=routing_w, spacing=2.5*routing_w,
                           pad_offset=pad_outline+routing_w, layer=nbn_layer)
     routes = R << pg.outline(routes, distance=dev_outline, open_ports=True, layer=nbn_layer)
+    qp(exp)
+    qp(pa)
     D << R
     D = pg.union(D, by_layer=True)
     return D
