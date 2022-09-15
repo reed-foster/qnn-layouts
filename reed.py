@@ -236,7 +236,7 @@ def pad_array(num_pads = 8,
     def port_idx(port_name, conn_dict, min_pads_per_side):
         # helper function to rename ports so they are ordered nicely
         side_keys = {'N': 0, 'E': 1, 'S': 2, 'W': 3}
-        side_key = side_keys[port_name[0]]*(min_pads_per_side + 1)
+        side_key = side_keys[port_name[0]]*np.max(pads_per_side)
         if port_name[0] in 'ES':
             side_key += conn_dict[port_name[0]] - int(port_name[1:])
         else:
@@ -306,28 +306,6 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
         if norm < min_dist:
             min_dist, min_pad = norm, i
 
-    # helper function for sorting pairs of ports based on their distance
-    # used by both routing steps
-    def pair_key(port_pair):
-        ep_n = port_pair[0].normal[1] - port_pair[0].center
-        pp_n = port_pair[1].normal[1] - port_pair[1].center
-        if abs(np.dot(ep_n, (1,0))) < 1e-9:
-            if abs(np.dot(pp_n, ep_n)) < 1e-9:
-                # ports are orthogonal, and exp_port is facing up/down so sort by exp_port x
-                # make negative so this gets routed first
-                # we'll route these out to the left/right edge depending on the pad_port location
-                return -abs(port_pair[0].x)
-            else:
-                # both ports are facing up/down so sort by x distance
-                return abs(port_pair[0].x - port_pair[1].x)
-        else:
-            if abs(np.dot(pp_n, ep_n)) < 1e-9:
-                # ports are orthogonal
-                return -abs(port_pair[0].y)
-            else:
-                # source (experiment) port is facing left/right so sort by y distance
-                return abs(port_pair[0].y - port_pair[1].y)
-    
     # group the pairs or ports based on whether or not they are orthogonal and which direction the
     # experiment port is facing
     pairs = [(exp_ports[i], pad_ports[(min_pad + i) % num_ports]) for i in range(num_ports)]
@@ -350,32 +328,33 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
   
     # first create partial paths for orthogonal pairs and create new port at the end of partial path
     for q, quadrant in enumerate(orthogonal_pairs):
-        # keep track of height on both halves of experiment face
+        # keep track of height/separation from experiment bbox on both halves of experiment face
         # halves are based on x/y coordinate of pad_p
         # since orthogonal ports are sorted based on how close they are to the edge of the bbox
         # processing them in sorted order and incrementing height appropriately will prevent collisions
         height = [0, 0]
-        for port_pair in sorted(quadrant, key = lambda p: -abs(p[0].x) if q < 2 else -abs(p[0].y)):
+        for port_pair in sorted(quadrant, key = lambda p: abs(p[0].x - p[1].x) if q < 2 else abs(p[0].y - p[1].y)):
             exp_p = port_pair[0]
             pad_p = port_pair[1]
+            start = np.array([exp_p.x, exp_p.y])
             if q < 2:
-                # select height index based on x coordinate of pad_p
-                h_idx = 0 if pad_p.x < 0 else 1
-                height[h_idx] += spacing if q == 0 else -spacing
-                start = (exp_p.x, exp_p.y + height[h_idx])
-                end = (exp_bbox[0][0] if pad_p.x < 0 else exp_bbox[1][0], exp_p.y + height[h_idx])
+                # select direction based on x coordinate of pad_p
+                direction = 0 if pad_p.x < 0 else 1
+                height[direction] += spacing
+                start += (0, height[direction] if q == 0 else -height[direction])
+                end = (exp_bbox[0][0] if pad_p.x < 0 else exp_bbox[1][0], start[1])
                 new_q = 3 if pad_p.x < 0 else 2
             else:
-                # select height index based on y coordinate of pad_p
-                h_idx = 0 if pad_p.y < 0 else 1
-                height[h_idx] += spacing if q == 2 else -spacing
-                start = (exp_p.x + height[h_idx], exp_p.y)
-                end = (exp_p.x + height[h_idx], exp_bbox[0][1] if pad_p.y < 0 else exp_bbox[1][1])
+                # select direction based on y coordinate of pad_p
+                direction = 0 if pad_p.y < 0 else 1
+                height[direction] += spacing
+                start += (height[direction] if q == 2 else -height[direction], 0)
+                end = (start[0], exp_bbox[0][1] if pad_p.y < 0 else exp_bbox[1][1])
                 new_q = 1 if pad_p.y < 0 else 0
             path = Path((exp_p.center, start, end))
             new_port = Port(name=exp_p.name, midpoint=end, width=exp_p.width,
                         orientation=(pad_p.orientation + 180) % 360)
-            grouped_pairs[new_q].append((new_port, pad_p, exp_p))
+            grouped_pairs[new_q].append((new_port, pad_p))
             paths[new_q].append(path)
     
     # split each quadrant of pairs into sections which can be routed independently
@@ -493,6 +472,7 @@ def autoroute(exp_ports, pad_ports, workspace_size, exp_bbox, width, spacing, pa
                     traceback.print_exc()
                     print('An error occurred with phidl.routing.route_smooth(), try increasing the size of the workspace')
                     print(sectioned_paths[q][s][p].points)
+                    raise ValueError(e)
                 # add taper
                 pad_p = pad_ports[port_pair[1].name]
                 final_w = port_pair[1].width + 2*(abs(route.ports[2].x - pad_p.x) + abs(route.ports[2].y - pad_p.y))

@@ -665,19 +665,22 @@ def make_device_pair(onchip_bias = True,
     output_ports = [len(shiftregs[0].ports) - 2]
     output_ports.append(output_ports[0] + len(shiftregs[1].ports))
     pad_count = len(exp.ports)
-    workspace_size = (1.6*E.xsize, 1.5*E.ysize)
+    #workspace_size = (1.5*E.xsize, 1.3*E.ysize)
+    #workspace_size = (1.8*E.xsize, 1.8*E.ysize)
+    workspace_size = (1.6*E.xsize, 2.0*E.ysize)
+    #workspace_size = (2.5*E.xsize, 2.5*E.ysize)
     pad_array = rg.pad_array(num_pads=pad_count, workspace_size=workspace_size,
                              pad_layers=tuple(nbn_pad_layer for i in range(pad_count)),
                              outline=pad_outline,
                              pad_size=(200,250),
                              pos_tone= {nbn_pad_layer: True})
     pa = D << pad_array
-    routes = rg.autoroute(exp_ports=new_exp_ports, pad_ports=list(pa.ports.values()), workspace_size=workspace_size,
-                          exp_bbox=exp.bbox, width=routing_w, spacing=2.5*routing_w,
-                          pad_offset=pad_outline+routing_w, layer=nbn_layer)
+    routes = rg.autoroute(exp_ports=new_exp_ports, pad_ports=list(sorted(pa.ports.values(), key=lambda v: v.name)),
+                          workspace_size=workspace_size, exp_bbox=exp.bbox, width=routing_w, spacing=2*routing_w,
+                          pad_offset=pad_outline+3*routing_w, layer=nbn_layer)
     routes = R << pg.outline(routes, distance=dev_outline, open_ports=True, layer=nbn_layer)
-    qp(exp)
-    qp(pa)
+    qp([exp, pad_array])
+    qp(routes)
     D << R
     D = pg.union(D, by_layer=True)
     return D
