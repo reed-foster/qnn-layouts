@@ -107,8 +107,9 @@ def resistor_with_vias(via_layer = 1,
                        res_layer = 2,
                        res_w = 3,
                        res_sq = 1,
-                       via_max_w = (1, None),
-                       max_height = None,
+                       via_min_w = 2,
+                       via_expansion = 1,
+                       max_length = None,
                        meander_spacing = 1):
     """
     creates a resistor with via connections
@@ -117,43 +118,50 @@ def resistor_with_vias(via_layer = 1,
     res_layer       - gds layer for resistor
     res_w           - resistor width in microns
     res_sq          - number of squares in resistor (between vias)
-    via_max_w       - tuple, maximum via width for each port (if none, then use res_w - 1)
-    max_height      - max height of resistor in microns (create meanders if max_height is not None and res_w*res_sq > max_height)
+    via_min_w       - minimum width of via
+    via_expansion   - width of resistor layer around via
+    max_length      - max length of resistor in microns (create meanders if max_length is not None and res_w*res_sq > max_length)
     meander_spacing - spacing between meanders in number of squares
     """
 
     D = Device('resistor_with_vias')
 
-    # check arguments
-    if via_max_w is None:
-        via_max_w = (None, None)
-    if len(via_max_w) != 2:
-        raise ValueError("invalid number of via max widths, please use None or (width1/None, width2/None)")
-
-    # determine meander count based on max_height
+    # determine meander count based on max_length
     n_meander = 0
-    hp_n = lambda n: res_w/2*(res_sq - 2*(1 + meander_spacing)*n - (2*n - 1)*height/res_w)
-    if max_height is None or res_w*res_sq < max_height:
-        height = res_w*res_sq
+    hp_n = lambda n, length: res_w/2*(res_sq - 2*(1 + meander_spacing)*n - (2*n - 1)*length/res_w)
+    if max_length is None or res_w*res_sq < max_length:
+        length = res_w*res_sq
     else:
-        height = max_height
+        length = max_length
         # num squares = (2*
-        while hp_n(n_meander) > height:
+        while hp_n(n_meander, length) > length:
             n_meander += 1
-        if hp_n(n_meander) < 0:
+        if hp_n(n_meander, length) < 0:
             n_meander -= 1
 
-
+    req_via_w = (4 * n_meander + 1) * res_w
+    via_w = max(via_min_w, req_via_w - 2 * via_expansion)
+    via_l = via_min_w
     vias = []
-    for n, v_wmax in enumerate(via_max_w):
-        via_w = min(v_wmax, res_w - 1) if v_wmax is not None else res_w - 1
-        v = D << pg.rectangle(size=(via_w, via_w), layer=via_layer)
-        dx = -v.xmax - height/2 if n == 0 else v.xmin + height/2
+    for i in range(2):
+        v = D << pg.rectangle(size=(via_l, via_w), layer=via_layer)
+        ve = D << pg.rectangle(size=(via_l + 2 * via_expansion, via_w + 2 * via_expansion), layer=res_layer)
+        dx = -v.xmax - via_expansion - length/2 - 2 * res_w if i == 0 else v.xmin + via_expansion + length/2 + 2 * res_w
         v.move((dx, -v.y))
-        vias.append(v)
-    vias[1].move((0, 2*(1 + meander_spacing)*n_meander*res_w))
-    res_long = pg.rectangle(size=(height + 2*res_w, res_w), layer=res_layer)
-    res_short = pg.rectangle(size=(hp_n(n_meander) + 2*res_w, res_w), layer=res_layer)
+        ve.move((dx - via_expansion, -ve.y))
+        vias.append(ve)
+    #qp(D)
+    #return D
+
+    #for n, v_wmax in enumerate(via_max_w):
+    #    via_w = min(v_wmax, max(res_w - 1, 0.5)) if v_wmax is not None else max(res_w - 1, 0.5)
+    #    v = D << pg.rectangle(size=(via_w, via_w), layer=via_layer)
+    #    dx = -v.xmax - height/2 if n == 0 else v.xmin + height/2
+    #    v.move((dx, -v.y))
+    #    vias.append(v)
+    #vias[1].move((0, 2*(1 + meander_spacing)*n_meander*res_w))
+    res_long = pg.rectangle(size=(length, res_w), layer=res_layer)
+    res_short = pg.rectangle(size=(hp_n(n_meander, length), res_w), layer=res_layer)
     conn = pg.rectangle(size=(res_w, (2 + meander_spacing)*res_w), layer=res_layer)
     # handle case where no meander is used
     if n_meander == 0:
@@ -163,30 +171,103 @@ def resistor_with_vias(via_layer = 1,
     for i in range(2*n_meander - 1):
         r = D << res_long
         c = D << conn
-        dy = 2*(1 + meander_spacing)*n_meander*res_w - (1 + meander_spacing)*res_w*i
-        r.move((-r.x, -r.y + dy))
+        dy = 2*(1 + meander_spacing)*n_meander*res_w - (1 + meander_spacing)*res_w*i - req_via_w/2
+        r.move((-r.x, -r.ymin + dy))
         if i % 2 == 0:
-            c.move((vias[0].xmax - c.xmax, -c.ymax + res_w/2 + dy))
+            c.move((vias[0].xmax - c.xmin + res_w, -c.ymax + res_w + dy))
         else:
-            c.move((vias[1].xmin - c.xmin, -c.ymax + res_w/2 + dy))
-    # create short meanders
+            c.move((vias[1].xmin - c.xmax - res_w, -c.ymax + res_w + dy))
+    # create short meanders and add final connectors
     if n_meander > 0:
         for i in range(2):
             r = D << res_short
-            r.move((vias[0].xmax - r.xmin - res_w, -r.y + (1 + meander_spacing)*res_w*i))
+            r.move((vias[0].xmax - r.xmin + 2*res_w, -r.ymin + (1 + meander_spacing)*res_w*i - req_via_w/2))
             if i == 0:
                 c = D << conn
-                c.move((vias[0].xmax - c.xmin + hp_n(n_meander), -c.ymin - res_w/2))
-    #D.move((-D.x, -D.y))
+                c.move((vias[0].xmax - c.xmin + hp_n(n_meander, length) + 2*res_w, -c.ymin - req_via_w/2))
+    # add final connectors
+    c = D << pg.rectangle(size=(2 * res_w, res_w), layer=res_layer)
+    c.move((vias[0].xmax - c.xmin, -req_via_w/2 - c.ymin))
+    c = D << pg.rectangle(size=(2 * res_w, res_w), layer=res_layer)
+    c.move((vias[1].xmin - c.xmax, req_via_w/2 - c.ymax))
+    D.move((-D.x, -D.y))
     D = pg.union(D, by_layer=True)
     D.add_port(name=1, midpoint=(vias[0].xmin, vias[0].y), width=vias[0].ysize, orientation=180)
     D.add_port(name=2, midpoint=(vias[1].xmax, vias[1].y), width=vias[1].ysize, orientation=0)
+    return D
+
+def resistor_negtone(width = 1,
+                      squares = 2,
+                      contact_base = 2,
+                      contact_height = 2,
+                      outline_sup = 1,
+                      routing = 1,
+                      layer_res = 2,
+                      layer_sup = 1,
+                      ):
+    D = Device('resistor')
+    info = locals()
+    length = squares*width+2*outline_sup
+    if squares>50:
+        res = D<<qg.snspd_vert(wire_width = width, wire_pitch = 1.5*width, size = (width*20, None), num_squares = squares, terminals_same_side = False, extend=None, layer = layer_res)
+    else:
+        res = D<<pg.straight(size = (width,length), layer = layer_res)
+    res.center = (0,0)
+    contact1 = D<<pg.straight(size = (contact_base,contact_height), layer = layer_res)
+    contact2 = D<<pg.straight(size = (contact_base,contact_height), layer = layer_res)
+    contact1.connect(contact1.ports[1], res.ports[1])
+    contact2.connect(contact2.ports[1], res.ports[2])
+    contact1_sup = D<<pg.straight(size = (contact_base+2*outline_sup,contact_height+2*outline_sup), layer = layer_sup)
+    contact2_sup = D<<pg.straight(size = (contact_base+2*outline_sup,contact_height+2*outline_sup), layer = layer_sup)
+    contact1_sup.center = contact1.center
+    contact2_sup.center = contact2.center
+    rout1 = D<<pg.straight(size = (routing,2), layer = layer_sup)
+    rout2 = D<<pg.straight(size = (routing,2), layer = layer_sup)
+    rout1.connect(rout1.ports[1], contact1_sup.ports[1])
+    rout2.connect(rout2.ports[1], contact2_sup.ports[2])
+    D = pg.union(D, by_layer=True)
+    D.add_port(port = rout1.ports[2], name = 1)
+    D.add_port(port = rout2.ports[2], name = 2)
+    D.rotate(90)
+    D.info = info
+    return D
+
+def ntron_sharp(constriction_w = 0.25,
+                wire_w = 0.5,
+                source_sq = 5,
+                drain_sq = 5,
+                channel_sq = 1,
+                layer = 1):
+    """
+    sharp nTron geometry
+    
+    constriction_w  - width of channel in microns
+    wire_w          - final width of tapers
+    source_sq       - (approximate) number of squares in source taper
+    drain_sq        - (approximate) number of squares in draintaper
+    channel_sq      - number of squares in channel
+    layer           - GDS layer
+    """
+    D = Device("ntron_sharp")
+    channel = D << pg.compass(size=(constriction_w, channel_sq*constriction_w), layer=layer)
+    source_taper = D << pg.taper(source_sq*wire_w - constriction_w/2, wire_w, constriction_w, layer=layer)
+    drain_taper = D << pg.taper(drain_sq*wire_w - constriction_w/2, wire_w, constriction_w, layer=layer)
+    gate_taper = D << pg.taper(wire_w - constriction_w/2, wire_w, constriction_w, layer=layer)
+    source_taper.connect(source_taper.ports[2], channel.ports['S'])
+    drain_taper.connect(drain_taper.ports[2], channel.ports['N'])
+    gate_taper.connect(gate_taper.ports[2], channel.ports['W'])
+    D = pg.union(D)
+    D.flatten(single_layer=layer)
+    D.add_port(name='gate', port=gate_taper.ports[1])
+    D.add_port(name='drain', port=drain_taper.ports[1])
+    D.add_port(name='source', port=source_taper.ports[1])
     return D
 
 def pad_array(num_pads = 8,
               workspace_size = (100, 200),
               pad_size = (200, 250),
               pad_layers = (2,2,1,2,2,2,2,2),
+              skip_pads = (),
               outline = 10,
               pos_tone = {1: False, 2: True}):
     """
@@ -199,6 +280,7 @@ def pad_array(num_pads = 8,
     workspace_size  - tuple, width and height (in microns) of workspace area
     pad_size        - tuple, width and height (in microns) of each pad
     pad_layers      - tuple, gds layer for each pad (index 0 corresponds to the leftmost pad in the top row)
+    skip_pads       - indices of pads to skip (index 0 is leftmost pad on north side, pad index increases CW)
     outline         - outline width for positive tone
     pos_tone        - dictionary of whether or not to do positive tone for each layer
     """
@@ -247,10 +329,13 @@ def pad_array(num_pads = 8,
     outer_ports = sorted(outer_compass.get_ports(), key=lambda p: port_idx(p.name, conn_dict, min_pad_per_side))
     final_ports = []
     for n, (p1, p2) in enumerate(zip(inner_ports, outer_ports)):
+        if n in skip_pads:
+            continue
         T = Device('pad')
         workspace_connector = T << pg.straight(size=(p1.width/2-outline, p1.width/2), layer=pad_layers[n])
         workspace_connector.connect(workspace_connector.ports[1], p1)
-        final_ports.append(workspace_connector.ports[1])
+        p = workspace_connector.ports[1]
+        final_ports.append(Port(name=n, midpoint=p.midpoint, width=p.width, orientation=p.orientation))
         pad = T << pg.straight(size=pad_size, layer=pad_layers[n])
         pad.connect(pad.ports[1], p2)
         T << pr.route_quad(workspace_connector.ports[2], pad.ports[1],
@@ -270,6 +355,7 @@ def pad_array(num_pads = 8,
                     etch.move((pad.x - etch.x, pad.y - etch.y))
     D = pg.union(D, by_layer=True)
     for n, p in enumerate(final_ports):
+        #D.add_port(name=p.name, port=p)
         D.add_port(name=n, port=p)
     return D
 
@@ -502,17 +588,21 @@ if __name__ == "__main__":
     D = Device("test")
     #D << qg.pad_array(pad_iso=True, de_etch=True)
     #D << qg.pad_array(num=8, outline=10, layer=2)
-    #D << pad_array(num_pads=22, workspace_size=(500, 800), pad_layers=tuple(1 for i in range(22)), outline=10, pos_tone={1:True})
-    D << optimal_l(width=(1,1))
-    D << optimal_l(width=(1,3))
-    D << optimal_l(width=(5,1))
+    #D << pad_array(num_pads=22, workspace_size=(500, 800), pad_layers=tuple(1 for i in range(22)), skip_pads=(1,3), outline=10, pos_tone={1:True})
+    #D << optimal_l(width=(1,1))
+    #D << optimal_l(width=(1,3))
+    #D << optimal_l(width=(5,1))
     #D << optimal_tee(width=(1,1))
     #D << optimal_tee(width=(1,5))
     #D << pg.optimal_hairpin(width=1, pitch=1.2, length=5, turn_ratio=2, num_pts=100)
-    #D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=50, via_max_w=None, max_height=50)
-    #D << resistor_with_vias(via_layer=1, res_layer=2, res_w=5, res_sq=50, via_max_w=None, max_height=80)
-    #D << pg.straight(size=(4,2))
-    #D << pg.straight(size=(3,9))
+    r1 = resistor_with_vias(via_layer=1, res_layer=2, res_w=0.1, res_sq=300, via_min_w=0.5, via_expansion=0.25, max_length=5)
+    r2 = resistor_with_vias(via_layer=1, res_layer=2, res_w=0.1, res_sq=358, via_min_w=1, via_expansion=0.2, max_length=7)
+    D << r1
+    D << r2
+    r3 = resistor_negtone(width=0.5, squares=2, contact_base=2, contact_height=2, outline_sup=1, routing=1)
+    r4 = resistor_negtone(width=0.5, squares=2, contact_base=2, contact_height=2, outline_sup=1, routing=1)
+    D << r3
+    D << r4
     D.distribute(direction = 'y', spacing = 10)
     qp(D)
     input('press any key to exit')

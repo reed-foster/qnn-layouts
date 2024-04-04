@@ -9,6 +9,7 @@ Created on Wed Aug 31 14:00:00 2022
 import numpy as np
 from phidl import Device
 from phidl import Path
+from phidl import Port
 import phidl.geometry as pg
 import phidl.routing as pr
 import phidl.path as pp
@@ -22,6 +23,97 @@ import qnngds.utilities as qu
 import qnngds.geometry as qg
 
 import reed as rg
+
+def htron_array(wire_w = 1,
+                routing_w = 5,
+                channel_w = (0.14, 0.28, 0.56),
+                heater_w = (1, 2, 3),
+                heater_sq = 3,
+                dev_outline = 0.2,
+                pad_outline = 10,
+                max_field_size = 450,
+                nbn_pad_layer = 1,
+                nbn_layer = 0,
+                via_layer = 2,
+                heater_layer = 3):
+    """Create an array of htron devices with different channel and heater widths
+
+    wire_w          - width of wire in microns (not super relevant)
+    routing_w       - width of routing wire in microns
+    channel_w       - tuple, widths of superconducting channel constriction for sweep
+    heater_w        - tuple, widths of TiAu heater for sweep
+    heater_sq       - number of squares in heater
+    dev_outline     - device outline width (for positive tone) in microns
+    pad_outline     - pad outline width in microns
+    max_field_size  - 
+    nbn_pad_layer   -
+    nbn_layer       -
+    via_layer       -
+    heater_layer    -
+    """
+
+    D = Device('htron_array')
+    htrons = []
+    for ch_w in channel_w:
+        for h_w in heater_w:
+            H = Device('htron')
+            channel = H << pg.compass(size=(ch_w, ch_w))
+            source_taper = H << pg.taper(5*wire_w - ch_w/2, wire_w, ch_w)
+            drain_taper = H << pg.taper(5*wire_w - ch_w/2, wire_w, ch_w)
+            bias_taper = H << pg.optimal_step(start_width=wire_w, end_width=routing_w, symmetric=True)
+            gnd_taper = H << qg.hyper_taper(length=routing_w, wide_section=routing_w, narrow_section=wire_w)
+            heater_bias = H << rg.optimal_l(width=routing_w, side_length=5*routing_w)
+            source_taper.connect(source_taper.ports[2], channel.ports['S'])
+            drain_taper.connect(drain_taper.ports[2], channel.ports['N'])
+            gnd_taper.connect(gnd_taper.ports[1], source_taper.ports[1])
+            bias_taper.connect(bias_taper.ports[1], drain_taper.ports[1])
+            heater_bias.connect(heater_bias.ports[1], channel.ports['W'])
+            heater_bias.move((-wire_w/2, 0))
+            H.add_port(name='gnd', port=gnd_taper.ports[2])
+            H.add_port(name='bias', port=bias_taper.ports[2])
+            H.add_port(name='heat', port=heater_bias.ports[2])
+            H = pg.outline(H, distance=dev_outline, open_ports=True, layer=nbn_layer)
+            heater = H << rg.resistor_with_vias(via_layer=via_layer, res_layer=heater_layer,
+                                                res_w=h_w, res_sq=heater_sq, via_max_w=None,
+                                                max_height=None, meander_spacing=1)
+            heater.move((channel.x - heater.x, channel.y - heater.y))
+            htrons.append(H)
+    num_htrons = len(htrons)
+    num_pads = 2*num_htrons + 4
+    subarrays = []
+    for i in range((num_htrons-1)//5 + 1):
+        S = Device('subarray')
+        nh = 5 if i < (num_htrons-1)//5 else (num_htrons % 5)
+        num_pads = 2*(nh + 2)
+        workspace_size = (80*nh, 80*2)
+        pa = S << rg.pad_array(num_pads=num_pads, workspace_size=workspace_size,
+                               pad_layers=tuple(nbn_pad_layer for i in range(num_pads)),
+                               skip_pads=(nh, nh + 1, num_pads - 2, num_pads - 1),
+                               outline=pad_outline, pos_tone={nbn_pad_layer: True})
+        bias_ports = []
+        heater_ports = []
+        E = Device('experiment')
+        for n, htron in enumerate(htrons[5*i:5*i+nh]):
+            h = E << htron
+            h.move((pa.ports[n].x - h.x, 0))
+            bias_ports.append(Port(name=n, midpoint=h.ports['bias'].midpoint, width=routing_w,
+                                   orientation=h.ports['bias'].orientation))
+            heater_ports.append(Port(name=num_htrons + n, midpoint=h.ports['heat'].midpoint, width=routing_w,
+                                     orientation=h.ports['heat'].orientation))
+        exp_ports = bias_ports + list(reversed(heater_ports))
+        exp = S << E
+        R = Device('routes')
+        routes = rg.autoroute(exp_ports=exp_ports, pad_ports=list(sorted(pa.ports.values(), key=lambda v: v.name)),
+                              workspace_size=workspace_size, exp_bbox=exp.bbox, width=routing_w, spacing=2*routing_w,
+                              pad_offset=pad_outline+3*routing_w, layer=nbn_layer)
+        routes = R << pg.outline(routes, distance=dev_outline, open_ports=True, layer=nbn_layer)
+        S << R
+        S = pg.union(S, by_layer=True)
+        subarray = D << S
+        if subarray.xsize < subarray.ysize:
+            subarray.rotate(90)
+        subarray.move((0, D.ymax - subarray.ymin + 100))
+    return D
 
 def shiftreg_halfstage(ind_sq = 500,
                        ind_spacing = 3,
@@ -146,6 +238,7 @@ def shiftreg_halfstage(ind_sq = 500,
     D.add_port(name='htron_ch', midpoint=htron_channel.center, width=htron_channel_w, orientation=180)
     return D
 
+
 def multistage_shiftreg(stage_count = 3,
                         ind_spacing = 10,
                         readout_channel_w = 0.24,
@@ -164,7 +257,7 @@ def multistage_shiftreg(stage_count = 3,
     """
     shift register
     
-    cascaded half stages, each with individually settable inductor spacing
+    cascaded half stages
     parameters:
     stage_count                 - number of stages
     ind_spacing                 - spacing between ntron column and loop inductor in microns for each stage
@@ -476,7 +569,9 @@ def shiftreg_snspd_row(nbn_layer = 0,
         if i < num_snspds - 1:
             shiftreg_clk_ports.append(D.ports[3*i+2])
         shiftreg_heater_ports.append(D.ports[3*i])
+    #########################################
     # create biasing network
+    #########################################
     if onchip_bias:
         BS = Device("bias_superconductors")
         BR = Device("bias_resistors")
@@ -581,10 +676,12 @@ def shiftreg_snspd_row(nbn_layer = 0,
         D.add_port(name=len(bs_ports) + 1, port=readout_ports[1])
     return D
 
-def make_device_pair(onchip_bias = True,
+def make_device_pair(onchip_bias = (True, False),
+                     snspd = (False, False),
                      snspd_count = 3,
                      dev_outline = 0.2,
                      pad_outline = 10,
+                     max_field_size = 450,
                      nbn_pad_layer = 1,
                      nbn_layer = 0,
                      via_layer = 2,
@@ -604,30 +701,77 @@ def make_device_pair(onchip_bias = True,
                      routing_w = 5,
                      drain_sq = 10,
                      source_sq = 5):
+    """
+    make a pair of shiftreg devices and a pad array for wirebonding/probing
+
+    each shiftreg in the pair can optionally have SNSPDs or an onchip bias network
+    currently does not support both SNSPD and onchip bias network
+    parameters:
+    onchip_bias                 - tuple, True if heater layer should be used for making onchip bias resistors
+    snspd                       - tuple, True if snspd meander should be fabbed, False if just the heater
+    snspd_count                 - number of SNSPDs or input heater signals (stage_count will be 2*snspd_count + 1)
+    dev_outline                 - device outline width in microns
+    pad_outline                 - pad layer outline width in microns
+    max_field_size              - maximum size of experiment area for writing in e-beam field
+    nbn_pad_layer               - gds layer for NbN pad array (pos. tone, NbN etch, higher beam power than nbn_layer)
+    nbn_layer                   - gds layer for NbN devices (pos. tone, NbN etch)
+    via_layer                   - gds layer for SiO2 etch pattern (pos. tone, SiO2 etch)
+    heater_layer                - gds layer for Ti/Au heater (pos. tone, liftoff)
+    snspd_w                     - optionally tuple for each device, snspd wire width in microns
+    snspd_ff                    - snspd fill factor (as ratio between 0 and 1)
+    snspd_sq                    - optionally tuple for each device, number of squares in snspd
+    heater_w                    - width of heater in microns
+    readout_channel_w           - optionally tuple for each device, width of readout ntron channel in microns
+    readout_gate_w              - optionally tuple for each device, width of readout ntron gate in microns
+    readout_source_sq           - number of squares for source of readout ntron 
+    readout_drain_sq            - number of squares for drain of readout ntron 
+    ind_sq                      - number of squares in loop inductor
+    wire_w                      - width of wire in microns
+    htron_constriction_ratio    - optionally tuple for each device, ratio of htron to ntron constriction (should be > 1)
+    constriction_w              - optionally tuple for each device, width of channel/gate constriction in microns
+    routing_w                   - width of routing wires in microns
+    drain_sq                    - number of squares on drain side
+    source_sq                   - number of squares on source side
+    """
     D = Device('shiftreg_experiment')
     E = Device('experiment')
     R = Device('routes')
+
+    # parse optional tuple parameters
+    if isinstance(snspd_w, (int, float)):
+        snspd_w = (snspd_w, snspd_w)
+    if isinstance(snspd_sq, (int, float)):
+        snspd_sq = (snspd_sq, snspd_sq)
+    if isinstance(readout_channel_w, (int, float)):
+        readout_channel_w = (readout_channel_w, readout_channel_w)
+    if isinstance(readout_gate_w, (int, float)):
+        readout_gate_w = (readout_gate_w, readout_gate_w)
+    if isinstance(htron_constriction_ratio, (int, float)):
+        htron_constriction_ratio = (htron_constriction_ratio, htron_constriction_ratio)
+    if isinstance(constriction_w, (int, float)):
+        constriction_w = (constriction_w, constriction_w)
+
     shiftregs = []
     port_offset = 0
-    for snspd in (True, False):
-        if snspd:
-            pitch = snspd_w/snspd_ff
-            snspd_size = (pitch*snspd_w*snspd_sq)**0.5
+    for i in range(2):
+        if snspd[i]:
+            pitch = snspd_w[i]/snspd_ff
+            snspd_size = (pitch*snspd_w[i]*snspd_sq[i])**0.5
             ind_width = 50*wire_w if ind_sq > 500 else (30*wire_w if ind_sq > 200 else 20*wire_w)
             spacing = max(snspd_size/2 - ind_width + 5, 10)
         else:
             spacing = 30
         shiftreg = E << shiftreg_snspd_row(nbn_layer=nbn_layer, via_layer=via_layer, heater_layer=heater_layer,
-                                           onchip_bias=onchip_bias if not snspd else False, snspd=snspd,
-                                           snspd_w=snspd_w, snspd_ff=snspd_ff, snspd_sq=snspd_sq,
+                                           onchip_bias=onchip_bias[i], snspd=snspd[i],
+                                           snspd_w=snspd_w[i], snspd_ff=snspd_ff, snspd_sq=snspd_sq[i],
                                            heater_w=heater_w, stage_count=2*snspd_count - 1, ind_spacing=spacing,
-                                           readout_channel_w=readout_channel_w, readout_gate_w=readout_gate_w,
+                                           readout_channel_w=readout_channel_w[i], readout_gate_w=readout_gate_w[i],
                                            readout_source_sq=readout_source_sq, readout_drain_sq=readout_drain_sq,
                                            ind_sq=ind_sq, dev_outline=dev_outline, wire_w=wire_w,
-                                           htron_constriction_ratio=htron_constriction_ratio,
-                                           constriction_w=constriction_w, routing_w=routing_w, drain_sq=drain_sq,
+                                           htron_constriction_ratio=htron_constriction_ratio[i],
+                                           constriction_w=constriction_w[i], routing_w=routing_w, drain_sq=drain_sq,
                                            source_sq=source_sq)
-        if not snspd:
+        if i == 1:
             shiftreg.rotate(180)
             shiftreg.move((shiftregs[0].x - shiftreg.x, shiftregs[0].ymin - shiftreg.ymax - 10*routing_w))
         shiftregs.append(shiftreg)
@@ -637,24 +781,28 @@ def make_device_pair(onchip_bias = True,
         port_offset += len(shiftreg.ports.items())
     E.move((-E.x, -E.y))
     exp = D << E
+    exp_ymax = exp.ymax
+    exp_ymin = exp.ymin
+    exp_xmax = exp.xmax
+    exp_xmin = exp.xmin
     new_exp_ports = []
     for i in range(len(exp.ports)):
         exp_port = exp.ports[i]
         ep_n = exp_port.normal[1] - exp_port.center
-        if np.dot(ep_n, (1,0)) == 0:
-            if np.dot(ep_n, (0,1)) > 0:
+        if abs(np.dot(ep_n, (1,0))) < 1e-9:
+            if np.dot(ep_n, (0,1)) > 1e-9:
                 # up
-                straight_len = exp.ymax - exp_port.center[1]
+                straight_len = exp_ymax - exp_port.y
             else:
                 # down
-                straight_len = exp_port.center[1] - exp.ymin 
+                straight_len = exp_port.y - exp_ymin 
         else:
-            if np.dot(ep_n, (1,0)) > 0:
+            if np.dot(ep_n, (1,0)) > 1e-9:
                 # right
-                straight_len = exp.xmax - exp_port.center[0]
+                straight_len = exp_xmax - exp_port.x
             else:
                 # left
-                straight_len = exp_port.center[0] - exp.xmin
+                straight_len = exp_port.x - exp_xmin
         if straight_len > 0:
             s = pg.straight(size=(routing_w, straight_len))
             ol = pg.outline(s, distance=dev_outline, open_ports=True, layer=nbn_layer)
@@ -665,10 +813,8 @@ def make_device_pair(onchip_bias = True,
     output_ports = [len(shiftregs[0].ports) - 2]
     output_ports.append(output_ports[0] + len(shiftregs[1].ports))
     pad_count = len(exp.ports)
-    #workspace_size = (1.5*E.xsize, 1.3*E.ysize)
-    #workspace_size = (1.8*E.xsize, 1.8*E.ysize)
-    workspace_size = (1.6*E.xsize, 2.0*E.ysize)
-    #workspace_size = (2.5*E.xsize, 2.5*E.ysize)
+    workspace_size = (min(1.7*E.xsize, max_field_size), min(1.7*E.ysize, max_field_size))
+    #workspace_size = (1.5*E.xsize, 3.0*E.ysize)
     pad_array = rg.pad_array(num_pads=pad_count, workspace_size=workspace_size,
                              pad_layers=tuple(nbn_pad_layer for i in range(pad_count)),
                              outline=pad_outline,
@@ -679,35 +825,144 @@ def make_device_pair(onchip_bias = True,
                           workspace_size=workspace_size, exp_bbox=exp.bbox, width=routing_w, spacing=2*routing_w,
                           pad_offset=pad_outline+3*routing_w, layer=nbn_layer)
     routes = R << pg.outline(routes, distance=dev_outline, open_ports=True, layer=nbn_layer)
-    qp([exp, pad_array])
-    qp(routes)
     D << R
     D = pg.union(D, by_layer=True)
     return D
-    
 
-D = Device("test")
-#D << multistage_shiftreg(ind_spacing=3, stage_count=3, ind_sq=200)
-#D << shiftreg_snspd_row(onchip_bias=True, snspd=False, ind_sq=500, ind_spacing=30, stage_count=7)
-#D << shiftreg_snspd_row(stage_count=3, onchip_bias=False, snspd=True, ind_sq=500, snspd_w=0.3, snspd_sq=10000, snspd_ff=0.2, wire_w=1, heater_w=3, routing_w=5)
-D << make_device_pair(onchip_bias=True, snspd_count=2, ind_sq=500, snspd_w=0.3, snspd_sq=20000, snspd_ff=0.2, wire_w=1, heater_w=3, routing_w=5)
-#D << make_device_pair(onchip_bias=False, snspd_count=3, ind_sq=500, snspd_w=0.3, snspd_sq=10000, snspd_ff=0.2, wire_w=1, heater_w=3, routing_w=5)
-qp(D)
-input('press any key to exit')
-exit()
-#D << pg.optimal_step(0.1, 1, symmetric=True)
-#D << rg.optimal_tee()
-#for ind_sq in [200]:
-for ind_sq in [200, 500, 1000]:
-#for ind_sq in [500, 1000, 2000]:
-    #D << shiftreg_snspd_row(ind_sq=ind_sq, ind_spacings=(20, 5, 20, 5, 20), wire_w=1, snspd=True, snspd_sq=15000, dev_outline=0.45)
-    #D << shiftreg_snspd_row(ind_sq=ind_sq, ind_spacings=(20, 5, 20, 5, 20), wire_w=1, snspd=False)
-    D << make_device_pair(ind_sq=ind_sq, ind_spacings=(20, 20, 20, 20, 20), snspd_sq=15000, dev_outline=0.45)
-    D << make_device_pair(ind_sq=ind_sq, ind_spacings=(10, 5, 10, 5, 10), snspd_sq=10000, snspd_w=0.3, dev_outline=0.45)
-    D << make_device_pair(ind_sq=ind_sq, ind_spacings=(10, 5, 10), snspd_sq=10000, snspd_w=0.3, dev_outline=0.45)
-    #D << multistage_shiftreg()
-D.distribute(direction = 'y', spacing = 10)
-#D.write_gds('shiftreg_snspd.gds', unit=1e-06, precision=1e-09, auto_rename=True, max_cellname_length=1024, cellname='toplevel')
-qp(D)
-
-input('press any key to exit')
+if __name__ == "__main__":
+    # make the experiment
+    D = Device("chip")
+    spacing = 500
+    nbn_layer = 0
+    nbn_pad_layer = 1
+    via_layer = 2
+    heater_layer = 3
+    outline_layer = 254
+    label_layer = 255
+    devices = []
+    snspd_ff = 0.28
+    max_field_size = 400
+    # do sweep of loop inductance and snspd width
+    for ind_sq in [200, 500, 1000]:
+        for snspd_w in [0.05, 0.1, 0.3]:
+            dev = make_device_pair(onchip_bias=(False, False),
+                                   snspd=(False, True),
+                                   snspd_count=2,
+                                   dev_outline=0.2,
+                                   pad_outline=10,
+                                   max_field_size=max_field_size,
+                                   nbn_pad_layer=nbn_pad_layer,
+                                   nbn_layer=nbn_layer,
+                                   via_layer=via_layer,
+                                   heater_layer=heater_layer,
+                                   snspd_w=snspd_w,
+                                   snspd_ff=snspd_ff,
+                                   snspd_sq=10000,
+                                   heater_w=3,
+                                   readout_channel_w=0.24,
+                                   readout_gate_w=0.035,
+                                   readout_source_sq=5,
+                                   readout_drain_sq=5,
+                                   ind_sq=ind_sq,
+                                   wire_w=1,
+                                   htron_constriction_ratio=2,
+                                   constriction_w=0.280,
+                                   routing_w=5,
+                                   drain_sq=10,
+                                   source_sq=5)
+            label = f'ind_sq={ind_sq}\nsnspd_w={snspd_w}\nconstriction_w=w0'
+            dev.add_label(text=label, position=dev.center, layer=label_layer)
+            devices.append(dev)
+    # add a couple more devices with smaller constrictions
+    for ind_sq in [200, 500, 1000]:
+        dev = make_device_pair(onchip_bias=(False, False),
+                               snspd=(False, False),
+                               snspd_count=2,
+                               dev_outline=0.2,
+                               pad_outline=10,
+                               max_field_size=max_field_size,
+                               nbn_pad_layer=nbn_pad_layer,
+                               nbn_layer=nbn_layer,
+                               via_layer=via_layer,
+                               heater_layer=heater_layer,
+                               snspd_w=0.3,
+                               snspd_ff=snspd_ff,
+                               snspd_sq=10000,
+                               heater_w=3,
+                               readout_channel_w=(0.12, 0.06),
+                               readout_gate_w=0.035,
+                               readout_source_sq=5,
+                               readout_drain_sq=5,
+                               ind_sq=ind_sq,
+                               wire_w=1,
+                               htron_constriction_ratio=2,
+                               constriction_w=(0.14, 0.07),
+                               routing_w=5,
+                               drain_sq=10,
+                               source_sq=5)
+        label = f'ind_sq={ind_sq}\nconstriction_w=(0.5*w0,0.25*w0)'
+        dev.add_label(text=label, position=dev.center, layer=label_layer)
+        devices.append(dev)
+    # onchip bias resistors
+    for ind_sq in [500, 1000]:
+        dev = make_device_pair(onchip_bias=(True, True),
+                               snspd=(False, False),
+                               snspd_count=2,
+                               dev_outline=0.2,
+                               pad_outline=10,
+                               max_field_size=max_field_size,
+                               nbn_pad_layer=nbn_pad_layer,
+                               nbn_layer=nbn_layer,
+                               via_layer=via_layer,
+                               heater_layer=heater_layer,
+                               snspd_w=0.3,
+                               snspd_ff=snspd_ff,
+                               snspd_sq=10000,
+                               heater_w=3,
+                               readout_channel_w=(0.24, 0.12),
+                               readout_gate_w=0.035,
+                               readout_source_sq=5,
+                               readout_drain_sq=5,
+                               ind_sq=ind_sq,
+                               wire_w=1,
+                               htron_constriction_ratio=2,
+                               constriction_w=(0.28, 0.14),
+                               routing_w=3,
+                               drain_sq=10,
+                               source_sq=5)
+        label = f'ind_sq={ind_sq}\nonchip_bias=True\nconstriction_w=(w0,0.5*w0)'
+        dev.add_label(text=label, position=dev.center, layer=label_layer)
+        devices.append(dev)
+    # make some htrons to characterize
+    dev = htron_array(wire_w=1,
+                      routing_w=5,
+                      channel_w=(0.14, 0.28, 0.56),
+                      heater_w=(0.7, 1.5, 3, 5),
+                      heater_sq=3,
+                      dev_outline=0.2,
+                      pad_outline=10,
+                      max_field_size=450,
+                      nbn_pad_layer=nbn_pad_layer,
+                      nbn_layer=nbn_layer,
+                      via_layer=via_layer,
+                      heater_layer=heater_layer)
+    label = f'channel_w=(0.14, 0.28, 0.56)\nheater_w=(1, 2, 3)'
+    dev.add_label(text=label, position=dev.center, layer=label_layer)
+    devices.append(dev)
+    duts = D << pg.packer(devices,
+                          spacing=spacing,
+                          aspect_ratio=(1, 1),
+                          max_size=(None, None),
+                          density=1.05,
+                          sort_by_area=False,
+                          verbose=False)[0]
+    D.center = (5000, 5000)
+    outline10 = D << pg.outline(pg.rectangle(size=(10e3, 10e3)), layer=outline_layer, distance=10)
+    outline08 = D << pg.outline(pg.rectangle(size=(8e3, 8e3)), layer=outline_layer, distance=10)
+    outline10.center = (5000, 5000)
+    outline08.center = (5000, 5000)
+    D.flatten()
+    D.write_gds('shiftreg_snspd.gds', unit=1e-06, precision=1e-09, auto_rename=True, max_cellname_length=1024, cellname='toplevel')
+    #qp(D)
+    #input('press any key to exit')
+    #exit()
